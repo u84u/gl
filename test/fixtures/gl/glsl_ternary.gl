@@ -1,0 +1,5 @@
+fn main(): vec4 {
+  let b: bool = true
+  let x: f32 = b ? 1.0 : 2.0
+  return vec4(x, 0.0, 0.0, 1.0)
+}

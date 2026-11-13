@@ -1,0 +1,6 @@
+fn main(): vec4 {
+  let a: i32 = 1 & 2
+  let b: i32 = 1 | 2
+  let c: i32 = 1 << 2
+  return vec4(1.0, 0.0, 0.0, 1.0)
+}

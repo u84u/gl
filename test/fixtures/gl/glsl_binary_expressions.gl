@@ -1,0 +1,5 @@
+fn main(): vec4 {
+  let x: f32 = 1.0 + 2.0 * 3.0
+  let y: f32 = -x
+  return vec4(x, y, 0.0, 1.0)
+}

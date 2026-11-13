@@ -1,0 +1,6 @@
+fn main(): vec4 {
+  let mut x: i32 = 1
+  ++x
+  x--
+  return vec4(1.0, 0.0, 0.0, 1.0)
+}

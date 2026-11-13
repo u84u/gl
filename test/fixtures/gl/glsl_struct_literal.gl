@@ -1,0 +1,6 @@
+struct Color { f32 r, f32 g, f32 b, f32 a }
+
+fn main(): vec4 {
+  let c: Color = { .r = 1.0, .g = 0.5, .b = 0.25, .a = 1.0 }
+  return vec4(c.r, c.g, c.b, c.a)
+}
