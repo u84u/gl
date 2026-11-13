@@ -4,6 +4,49 @@ import {
   Statement,
   Expression,
   Type,
+  // Type guards
+  isScalar,
+  isVector,
+  isMatrix,
+  isStructType,
+  isSampler,
+  isArray,
+  isLiteral,
+  isLiteralOfKind,
+  isIdentifier,
+  isBinaryExpr,
+  isUnaryExpr,
+  isCallExpr,
+  isMemberExpr,
+  isSwizzleExpr,
+  isIndexExpr,
+  isStructLiteral,
+  isArrayLiteral,
+  isCompoundAssignExpr,
+  isUpdateExpr,
+  isConditionalExpr,
+  isNullCoalescingExpr,
+  isMatchExpr,
+  isBlockExpr,
+  // Statement guards
+  isStructDecl,
+  isBindingDecl,
+  isImportDecl,
+  isFnDecl,
+  isVarDecl,
+  isReturnStmt,
+  isExpressionStmt,
+  isBlock,
+  isIfStmt,
+  isWhileStmt,
+  isForStmt,
+  isDoWhileStmt,
+  isLoopStmt,
+  isBreakStmt,
+  isContinueStmt,
+  isPanicStmt,
+  isUnreachableStmt,
+  isDiscardStmt,
 } from "./types";
 
 // Vector type prefix map shared between formatter and codegen.
@@ -47,51 +90,42 @@ const MAT_PREFIX_MAP: Record<string, string> = {
  * @returns The formatted type string.
  */
 function formatType(t: Type): string {
-  switch (t.kind) {
-    case "scalar":
-      return t.name;
-    case "vector": {
-      const prefix = VEC_TYPE_MAP[t.element] || "vec";
-      return `${prefix}${t.size}`;
-    }
-    case "struct":
-      return t.name;
-    case "sampler":
-      return t.name;
-    case "array":
-      return `[${formatType(t.element)}; ${t.size}]`;
-    case "quaternion":
-      return "quat";
-    case "matrix": {
-      const m = t;
-      const prefix = MAT_PREFIX_MAP[m.element] || "";
-      if (m.rows === m.columns) {
-        return `${prefix}mat${m.rows}`;
-      }
-      return `${prefix}mat${m.columns}x${m.rows}`;
-    }
-    case "opaque":
-      return `opaque ${t.name}`;
-    case "anonymousStruct":
-      return `{ ${t.fields.map(f => `${f.name}: ${formatType(f.type)}`).join(", ")} }`;
-    default:
-      throw new Error(`Cannot format type ${t.kind}`);
+  if (isScalar(t)) return t.name;
+  if (isVector(t)) {
+    const prefix = VEC_TYPE_MAP[t.element] || "vec";
+    return `${prefix}${t.size}`;
   }
+  if (isStructType(t)) return t.name;
+  if (isSampler(t)) return t.name;
+  if (isArray(t)) return `[${formatType(t.element)}; ${t.size}]`;
+  if (t.kind === "quaternion") return "quat";
+  if (isMatrix(t)) {
+    const prefix = MAT_PREFIX_MAP[t.element] || "";
+    if (t.rows === t.columns) {
+      return `${prefix}mat${t.rows}`;
+    }
+    return `${prefix}mat${t.columns}x${t.rows}`;
+  }
+  if (t.kind === "opaque") return `opaque ${t.name}`;
+  if (t.kind === "anonymousStruct") {
+    return `{ ${t.fields.map(f => `${f.name}: ${formatType(f.type)}`).join(", ")} }`;
+  }
+  throw new Error(`Cannot format type ${t.kind}`);
 }
 
 function formatLiteral(expr: Extract<Expression, { kind: "Literal" }>): string {
-  const { value, literalKind } = expr;
-  if (literalKind === "bool") return value ? "true" : "false";
-  if (literalKind === "int") return `${typeof value === "number" ? value : Number(value)}`;
-  if (literalKind === "float") {
+  const { value } = expr;
+  if (isLiteralOfKind(expr, "bool")) return value ? "true" : "false";
+  if (isLiteralOfKind(expr, "int")) return `${typeof value === "number" ? value : Number(value)}`;
+  if (isLiteralOfKind(expr, "float")) {
     const f = typeof value === "number" ? value : Number(value);
     if (Number.isInteger(f)) return `${f}.0`;
     return String(f);
   }
-  if (literalKind === "char") {
+  if (isLiteralOfKind(expr, "char")) {
     return `'${typeof value === "string" ? value : String(value)}'`;
   }
-  if (literalKind === "color") {
+  if (isLiteralOfKind(expr, "color")) {
     return `#${typeof value === "string" ? value : String(value)}`;
   }
   return String(value);
@@ -104,78 +138,83 @@ function formatLiteral(expr: Extract<Expression, { kind: "Literal" }>): string {
  * @returns The formatted expression string.
  */
 function formatExpression(expr: Expression): string {
-  switch (expr.kind) {
-    case "Identifier":
-      return expr.name;
-    case "Literal":
-      return formatLiteral(expr);
-    case "BinaryExpr":
-      return `(${formatExpression(expr.left)} ${expr.operator} ${formatExpression(expr.right)})`;
-    case "UnaryExpr":
-      return `(${expr.operator}${formatExpression(expr.operand)})`;
-    case "CallExpr": {
-      const args = expr.args.map(formatExpression).join(", ");
-      return `${formatExpression(expr.callee)}(${args})`;
-    }
-    case "MemberExpr":
-      return `${formatExpression(expr.object)}.${expr.property}`;
-    case "SwizzleExpr": {
-      const swizzle = expr.components.join("");
-      return `${formatExpression(expr.object)}.${swizzle}`;
-    }
-    case "IndexExpr":
-      return `${formatExpression(expr.object)}[${formatExpression(expr.index)}]`;
-    case "StructLiteral": {
-      const fields = expr.fields
-        .map((f) => {
-          if (f.name === null) return `..${formatExpression(f.value)}`;
-          return `${f.name} = ${formatExpression(f.value)}`;
-        })
-        .join(", ");
-      return `{ ${fields} }`;
-    }
-    case "ArrayLiteral": {
-      const elements = expr.elements.map(formatExpression).join(", ");
-      return `[${elements}]`;
-    }
-    case "CompoundAssignExpr": {
-      return `${formatExpression(expr.target)} ${expr.operator} ${formatExpression(expr.value)}`;
-    }
-    case "UpdateExpr": {
-      const op = expr.operator;
-      return expr.prefix ? `${op}${formatExpression(expr.operand)}` : `${formatExpression(expr.operand)}${op}`;
-    }
-    case "ConditionalExpr": {
-      return `${formatExpression(expr.test)} ? ${formatExpression(expr.consequent)} : ${formatExpression(expr.alternate)}`;
-    }
-    case "NullCoalescingExpr": {
-      return `${formatExpression(expr.left)} ?? ${formatExpression(expr.right)}`;
-    }
-    case "MatchExpr": {
-      const arms = expr.arms.map((arm) => {
-        const guard = arm.guard ? ` if ${formatExpression(arm.guard)}` : "";
-        let patternStr = "";
-        if (arm.pattern.kind === "literal" && arm.pattern.value !== null) {
-          patternStr = String(arm.pattern.value);
-        } else if (arm.pattern.kind === "binding" && arm.pattern.binding) {
-          patternStr = arm.pattern.binding;
-        } else if (arm.pattern.kind === "wildcard") {
-          patternStr = "_";
-        }
-        const bodyStr = arm.body.statements
-          .map((s) => formatStatement(s, 0).trim())
-          .join(" ");
-        return `${patternStr}${guard} => { ${bodyStr} }`;
-      }).join(", ");
-      return `match ${formatExpression(expr.subject)} { ${arms} }`;
-    }
-    case "BlockExpr": {
-      const stmts = expr.block.statements
+  if (isIdentifier(expr)) {
+    return expr.name;
+  }
+  if (isLiteral(expr)) {
+    return formatLiteral(expr);
+  }
+  if (isBinaryExpr(expr)) {
+    return `(${formatExpression(expr.left)} ${expr.operator} ${formatExpression(expr.right)})`;
+  }
+  if (isUnaryExpr(expr)) {
+    return `(${expr.operator}${formatExpression(expr.operand)})`;
+  }
+  if (isCallExpr(expr)) {
+    const args = expr.args.map(formatExpression).join(", ");
+    return `${formatExpression(expr.callee)}(${args})`;
+  }
+  if (isMemberExpr(expr)) {
+    return `${formatExpression(expr.object)}.${expr.property}`;
+  }
+  if (isSwizzleExpr(expr)) {
+    const swizzle = expr.components.join("");
+    return `${formatExpression(expr.object)}.${swizzle}`;
+  }
+  if (isIndexExpr(expr)) {
+    return `${formatExpression(expr.object)}[${formatExpression(expr.index)}]`;
+  }
+  if (isStructLiteral(expr)) {
+    const fields = expr.fields
+      .map((f) => {
+        if (f.name === null) return `..${formatExpression(f.value)}`;
+        return `${f.name} = ${formatExpression(f.value)}`;
+      })
+      .join(", ");
+    return `{ ${fields} }`;
+  }
+  if (isArrayLiteral(expr)) {
+    const elements = expr.elements.map(formatExpression).join(", ");
+    return `[${elements}]`;
+  }
+  if (isCompoundAssignExpr(expr)) {
+    return `${formatExpression(expr.target)} ${expr.operator} ${formatExpression(expr.value)}`;
+  }
+  if (isUpdateExpr(expr)) {
+    const op = expr.operator;
+    return expr.prefix ? `${op}${formatExpression(expr.operand)}` : `${formatExpression(expr.operand)}${op}`;
+  }
+  if (isConditionalExpr(expr)) {
+    return `${formatExpression(expr.test)} ? ${formatExpression(expr.consequent)} : ${formatExpression(expr.alternate)}`;
+  }
+  if (isNullCoalescingExpr(expr)) {
+    return `${formatExpression(expr.left)} ?? ${formatExpression(expr.right)}`;
+  }
+  if (isMatchExpr(expr)) {
+    const arms = expr.arms.map((arm) => {
+      const guard = arm.guard ? ` if ${formatExpression(arm.guard)}` : "";
+      let patternStr = "";
+      if (arm.pattern.kind === "literal" && arm.pattern.value !== null) {
+        patternStr = String(arm.pattern.value);
+      } else if (arm.pattern.kind === "binding" && arm.pattern.binding) {
+        patternStr = arm.pattern.binding;
+      } else if (arm.pattern.kind === "wildcard") {
+        patternStr = "_";
+      }
+      const bodyStr = arm.body.statements
         .map((s) => formatStatement(s, 0).trim())
         .join(" ");
-      return `{ ${stmts} }`;
-    }
+      return `${patternStr}${guard} => { ${bodyStr} }`;
+    }).join(", ");
+    return `match ${formatExpression(expr.subject)} { ${arms} }`;
   }
+  if (isBlockExpr(expr)) {
+    const stmts = expr.block.statements
+      .map((s) => formatStatement(s, 0).trim())
+      .join(" ");
+    return `{ ${stmts} }`;
+  }
+  throw new Error("Cannot format expression");
 }
 
 /**
@@ -187,146 +226,141 @@ function formatExpression(expr: Expression): string {
  */
 function formatStatement(stmt: Statement, indent: number): string {
   const pad = "  ".repeat(indent);
-  switch (stmt.kind) {
-    case "StructDecl": {
-      const lines = [`${pad}struct ${stmt.name} {`];
-      for (let i = 0; i < stmt.fields.length; i++) {
-        const field = stmt.fields[i];
-        if (!field) continue;
-        const comma = i < stmt.fields.length - 1 ? "," : "";
-        lines.push(`${pad}  ${formatType(field.type)} ${field.name}${comma}`);
-      }
-      lines.push(`${pad}}`);
-      return lines.join("\n");
+  if (isStructDecl(stmt)) {
+    const lines = [`${pad}struct ${stmt.name} {`];
+    for (let i = 0; i < stmt.fields.length; i++) {
+      const field = stmt.fields[i];
+      if (!field) continue;
+      const comma = i < stmt.fields.length - 1 ? "," : "";
+      lines.push(`${pad}  ${formatType(field.type)} ${field.name}${comma}`);
     }
-    case "BindingDecl": {
-      return `${pad}@binding(${stmt.binding}) uniform ${stmt.name}: ${formatType(stmt.type)};`;
-    }
-    case "ImportDecl": {
-      return `${pad}import "${stmt.path}";`;
-    }
-    case "FnDecl": {
-      const params = stmt.params.map((p) => `${formatType(p.type)} ${p.name}`).join(", ");
-      const lines = [`${pad}fn ${stmt.name}(${params}): ${formatType(stmt.returnType)} {`];
-      for (const s of stmt.body.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}}`);
-      return lines.join("\n");
-    }
-    case "VarDecl": {
-      let init = "";
-      if (stmt.initializer) {
-        init = ` = ${formatExpression(stmt.initializer)}`;
-      }
-      const mut = stmt.mutable ? "mut " : "";
-      return `${pad}let ${mut}${stmt.name}: ${formatType(stmt.type)}${init};`;
-    }
-    case "ReturnStmt": {
-      if (stmt.value) {
-        return `${pad}return ${formatExpression(stmt.value)};`;
-      }
-      return `${pad}return;`;
-    }
-    case "ExpressionStmt": {
-      return `${pad}${formatExpression(stmt.expression)};`;
-    }
-    case "Block": {
-      const lines = [`${pad}{`];
-      for (const s of stmt.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}}`);
-      return lines.join("\n");
-    }
-    case "IfStmt": {
-      const lines = [`${pad}if (${formatExpression(stmt.condition)}) {`];
-      for (const s of stmt.thenBranch.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}}`);
-      if (stmt.elseBranch) {
-        lines.push(`${pad}else {`);
-        for (const s of stmt.elseBranch.statements) {
-          lines.push(formatStatement(s, indent + 1));
-        }
-        lines.push(`${pad}}`);
-      }
-      return lines.join("\n");
-    }
-    case "WhileStmt": {
-      const lines = [`${pad}while (${formatExpression(stmt.condition)}) {`];
-      for (const s of stmt.body.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}}`);
-      return lines.join("\n");
-    }
-    case "ForStmt": {
-      if (stmt.range) {
-        const rangeOp = stmt.range.inclusive ? "..=" : "..";
-        const lines = [`${pad}for __loop_var in ${formatExpression(stmt.range.start)}${rangeOp}${formatExpression(stmt.range.end)} {`];
-        for (const s of stmt.body.statements) {
-          lines.push(formatStatement(s, indent + 1));
-        }
-        lines.push(`${pad}}`);
-        return lines.join("\n");
-      }
-      const initStr = stmt.init
-        ? stmt.init.kind === "VarDecl"
-          ? `let mut ${stmt.init.name}: ${formatType(stmt.init.type)} = ${formatExpression(stmt.init.initializer!)}`
-          : stmt.init.kind === "ExpressionStmt"
-            ? formatExpression(stmt.init.expression)
-            : ""
-        : "";
-      const condStr = stmt.condition ? formatExpression(stmt.condition) : "";
-      const incrStr = stmt.increment ? formatExpression(stmt.increment) : "";
-      const lines = [`${pad}for (${initStr}; ${condStr}; ${incrStr}) {`];
-      for (const s of stmt.body.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}}`);
-      return lines.join("\n");
-    }
-    case "DoWhileStmt": {
-      const lines = [`${pad}do {`];
-      for (const s of stmt.body.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}} while (${formatExpression(stmt.condition)});`);
-      return lines.join("\n");
-    }
-    case "LoopStmt": {
-      const lines = [`${pad}loop {`];
-      for (const s of stmt.body.statements) {
-        lines.push(formatStatement(s, indent + 1));
-      }
-      lines.push(`${pad}}`);
-      return lines.join("\n");
-    }
-    case "BreakStmt": {
-      return `${pad}break;`;
-    }
-    case "ContinueStmt": {
-      return `${pad}continue;`;
-    }
-    case "PanicStmt": {
-      if (stmt.message) {
-        return `${pad}panic ${formatExpression(stmt.message)};`;
-      }
-      return `${pad}panic;`;
-    }
-    case "UnreachableStmt": {
-      return `${pad}unreachable;`;
-    }
-    case "DiscardStmt": {
-      return `${pad}discard;`;
-    }
-    case "TypeAlias":
-    case "NewtypeDecl":
-    case "OpaqueDecl":
-      return "";
+    lines.push(`${pad}}`);
+    return lines.join("\n");
   }
+  if (isBindingDecl(stmt)) {
+    return `${pad}@binding(${stmt.binding}) uniform ${stmt.name}: ${formatType(stmt.type)};`;
+  }
+  if (isImportDecl(stmt)) {
+    return `${pad}import "${stmt.path}";`;
+  }
+  if (isFnDecl(stmt)) {
+    const params = stmt.params.map((p) => `${formatType(p.type)} ${p.name}`).join(", ");
+    const lines = [`${pad}fn ${stmt.name}(${params}): ${formatType(stmt.returnType)} {`];
+    for (const s of stmt.body.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}}`);
+    return lines.join("\n");
+  }
+  if (isVarDecl(stmt)) {
+    let init = "";
+    if (stmt.initializer) {
+      init = ` = ${formatExpression(stmt.initializer)}`;
+    }
+    const mut = stmt.mutable ? "mut " : "";
+    return `${pad}let ${mut}${stmt.name}: ${formatType(stmt.type)}${init};`;
+  }
+  if (isReturnStmt(stmt)) {
+    if (stmt.value) {
+      return `${pad}return ${formatExpression(stmt.value)};`;
+    }
+    return `${pad}return;`;
+  }
+  if (isExpressionStmt(stmt)) {
+    return `${pad}${formatExpression(stmt.expression)};`;
+  }
+  if (isBlock(stmt)) {
+    const lines = [`${pad}{`];
+    for (const s of stmt.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}}`);
+    return lines.join("\n");
+  }
+  if (isIfStmt(stmt)) {
+    const lines = [`${pad}if (${formatExpression(stmt.condition)}) {`];
+    for (const s of stmt.thenBranch.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}}`);
+    if (stmt.elseBranch) {
+      lines.push(`${pad}else {`);
+      for (const s of stmt.elseBranch.statements) {
+        lines.push(formatStatement(s, indent + 1));
+      }
+      lines.push(`${pad}}`);
+    }
+    return lines.join("\n");
+  }
+  if (isWhileStmt(stmt)) {
+    const lines = [`${pad}while (${formatExpression(stmt.condition)}) {`];
+    for (const s of stmt.body.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}}`);
+    return lines.join("\n");
+  }
+  if (isForStmt(stmt)) {
+    if (stmt.range) {
+      const rangeOp = stmt.range.inclusive ? "..=" : "..";
+      const lines = [`${pad}for __loop_var in ${formatExpression(stmt.range.start)}${rangeOp}${formatExpression(stmt.range.end)} {`];
+      for (const s of stmt.body.statements) {
+        lines.push(formatStatement(s, indent + 1));
+      }
+      lines.push(`${pad}}`);
+      return lines.join("\n");
+    }
+    const initStr = stmt.init
+      ? stmt.init.kind === "VarDecl"
+        ? `let mut ${stmt.init.name}: ${formatType(stmt.init.type)} = ${formatExpression(stmt.init.initializer!)}`
+        : stmt.init.kind === "ExpressionStmt"
+          ? formatExpression(stmt.init.expression)
+          : ""
+      : "";
+    const condStr = stmt.condition ? formatExpression(stmt.condition) : "";
+    const incrStr = stmt.increment ? formatExpression(stmt.increment) : "";
+    const lines = [`${pad}for (${initStr}; ${condStr}; ${incrStr}) {`];
+    for (const s of stmt.body.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}}`);
+    return lines.join("\n");
+  }
+  if (isDoWhileStmt(stmt)) {
+    const lines = [`${pad}do {`];
+    for (const s of stmt.body.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}} while (${formatExpression(stmt.condition)});`);
+    return lines.join("\n");
+  }
+  if (isLoopStmt(stmt)) {
+    const lines = [`${pad}loop {`];
+    for (const s of stmt.body.statements) {
+      lines.push(formatStatement(s, indent + 1));
+    }
+    lines.push(`${pad}}`);
+    return lines.join("\n");
+  }
+  if (isBreakStmt(stmt)) {
+    return `${pad}break;`;
+  }
+  if (isContinueStmt(stmt)) {
+    return `${pad}continue;`;
+  }
+  if (isPanicStmt(stmt)) {
+    if (stmt.message) {
+      return `${pad}panic ${formatExpression(stmt.message)};`;
+    }
+    return `${pad}panic;`;
+  }
+  if (isUnreachableStmt(stmt)) {
+    return `${pad}unreachable;`;
+  }
+  if (isDiscardStmt(stmt)) {
+    return `${pad}discard;`;
+  }
+  // TypeAlias, NewtypeDecl, OpaqueDecl, EnumDecl, ImplBlock, TraitDecl — no output
   return "";
 }
 

@@ -4,6 +4,49 @@ import {
   Expression,
   Type,
   StructDecl,
+  // Type guards
+  isScalar,
+  isVector,
+  isMatrix,
+  isStructType,
+  isSampler,
+  isArray,
+  isLiteral,
+  isLiteralOfKind,
+  isIdentifier,
+  isBinaryExpr,
+  isUnaryExpr,
+  isCallExpr,
+  isMemberExpr,
+  isSwizzleExpr,
+  isIndexExpr,
+  isStructLiteral,
+  isArrayLiteral,
+  isCompoundAssignExpr,
+  isUpdateExpr,
+  isConditionalExpr,
+  isNullCoalescingExpr,
+  isMatchExpr,
+  isBlockExpr,
+  // Statement guards
+  isStructDecl,
+  isBindingDecl,
+  isFnDecl,
+  isVarDecl,
+  isReturnStmt,
+  isExpressionStmt,
+  isBlock,
+  isIfStmt,
+  isWhileStmt,
+  isForStmt,
+  isDoWhileStmt,
+  isLoopStmt,
+  isBreakStmt,
+  isContinueStmt,
+  isPanicStmt,
+  isUnreachableStmt,
+  isDiscardStmt,
+  // Expression guards
 } from "../types";
 
 const SCALAR_MAP: Record<string, string> = {
@@ -63,37 +106,31 @@ const MAT_PREFIX_MAP: Record<string, string> = {
  * @returns The GLSL type string.
  */
 function glslType(t: Type): string {
-  switch (t.kind) {
-    case "scalar":
-      const mapped = SCALAR_MAP[t.name];
-      if (!mapped) throw new Error(`Unknown scalar type: ${t.name}`);
-      return mapped;
-    case "vector": {
-      const prefix = VEC_TYPE_MAP[t.element] || "vec";
-      return `${prefix}${t.size}`;
-    }
-    case "struct":
-      return t.name;
-    case "sampler":
-      return t.name;
-    case "quaternion":
-      return "vec4";
-    case "matrix": {
-      const m = t;
-      const prefix = MAT_PREFIX_MAP[m.element] || "";
-      if (m.rows === m.columns) {
-        return `${prefix}mat${m.rows}`;
-      }
-      return `${prefix}mat${m.columns}x${m.rows}`;
-    }
-    case "opaque":
-      return t.name;
-    case "anonymousStruct":
-      // Anonymous structs must be lifted to named structs for GLSL
-      return `AnonStruct_${t.fields.length}`;
-    default:
-      throw new Error(`Cannot emit GLSL type for ${t.kind}`);
+  if (isScalar(t)) {
+    const mapped = SCALAR_MAP[t.name];
+    if (!mapped) throw new Error(`Unknown scalar type: ${t.name}`);
+    return mapped;
   }
+  if (isVector(t)) {
+    const prefix = VEC_TYPE_MAP[t.element] || "vec";
+    return `${prefix}${t.size}`;
+  }
+  if (isStructType(t)) return t.name;
+  if (isSampler(t)) return t.name;
+  if (t.kind === "quaternion") return "vec4";
+  if (isMatrix(t)) {
+    const prefix = MAT_PREFIX_MAP[t.element] || "";
+    if (t.rows === t.columns) {
+      return `${prefix}mat${t.rows}`;
+    }
+    return `${prefix}mat${t.columns}x${t.rows}`;
+  }
+  if (t.kind === "opaque") return t.name;
+  if (t.kind === "anonymousStruct") {
+    // Anonymous structs must be lifted to named structs for GLSL
+    return `AnonStruct_${t.fields.length}`;
+  }
+  throw new Error(`Cannot emit GLSL type for ${t.kind}`);
 }
 
 /**
@@ -123,7 +160,14 @@ export function generateGLSL(program: Program): string {
   }
 
   if (mainIndex !== -1) {
-    const mainFn = program.statements[mainIndex] as Extract<Statement, { kind: "FnDecl" }>;
+    const mainFnStmt = program.statements[mainIndex];
+    if (!mainFnStmt) {
+      throw new Error("main statement is undefined");
+    }
+    if (!isFnDecl(mainFnStmt)) {
+      throw new Error("main is not a function declaration");
+    }
+    const mainFn = mainFnStmt;
     const returnType = mainFn.returnType;
     if (mainFn.params.length > 0) {
       throw new Error("main must take no parameters");
@@ -132,7 +176,7 @@ export function generateGLSL(program: Program): string {
       lines.push("");
     }
 
-    if (returnType.kind === "vector" && returnType.size === 4) {
+    if (isVector(returnType) && returnType.size === 4) {
       lines.push("out vec4 fragColor;");
       lines.push("");
       lines.push("void main() {");
@@ -140,7 +184,7 @@ export function generateGLSL(program: Program): string {
         emitStatement(lines, s, 1, { structName: "", fields: [] });
       }
       lines.push("}");
-    } else if (returnType.kind === "struct") {
+    } else if (isStructType(returnType)) {
       const structDecl = program.statements.find(
         (s): s is StructDecl => s.kind === "StructDecl" && s.name === returnType.name
       );
@@ -185,212 +229,206 @@ function emitStatement(
   outputInfo: { structName: string; fields: { name: string; type: Type }[] } | null = null,
 ): void {
   const pad = "  ".repeat(indent);
-  switch (stmt.kind) {
-    case "StructDecl": {
-      lines.push(`${pad}struct ${stmt.name} {`);
-      for (const field of stmt.fields) {
-        let fieldType: string;
-        let fieldSuffix = "";
-        if (field.type.kind === "array") {
-          fieldType = glslType(field.type.element);
-          fieldSuffix = `[${field.type.size}]`;
-        } else {
-          fieldType = glslType(field.type);
-        }
-        lines.push(`${pad}  ${fieldType} ${field.name}${fieldSuffix};`);
-      }
-      lines.push(`${pad}};`);
-      break;
-    }
-    case "BindingDecl": {
-      let declType: string;
-      let declSuffix = "";
-      if (stmt.type.kind === "array") {
-        declType = glslType(stmt.type.element);
-        declSuffix = `[${stmt.type.size}]`;
+  if (isStructDecl(stmt)) {
+    lines.push(`${pad}struct ${stmt.name} {`);
+    for (const field of stmt.fields) {
+      let fieldType: string;
+      let fieldSuffix = "";
+      if (isArray(field.type)) {
+        fieldType = glslType(field.type.element);
+        fieldSuffix = `[${field.type.size}]`;
       } else {
-        declType = glslType(stmt.type);
+        fieldType = glslType(field.type);
       }
-      const isSamplerBinding = stmt.type.kind === "sampler";
-      const bindingDecl = isSamplerBinding
-        ? `layout(binding = ${stmt.binding}) uniform ${declType} ${stmt.name}${declSuffix};`
-        : `uniform ${declType} ${stmt.name}${declSuffix};`;
-      lines.push(`${pad}${bindingDecl}`);
-      break;
+      lines.push(`${pad}  ${fieldType} ${field.name}${fieldSuffix};`);
     }
-    case "FnDecl": {
-      const params = stmt.params
-        .map((p) => `${glslType(p.type)} ${p.name}`)
-        .join(", ");
-      lines.push(`${pad}${glslType(stmt.returnType)} ${stmt.name}(${params}) {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, null);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "VarDecl": {
-      let declType: string;
-      let declSuffix = "";
-      if (stmt.type.kind === "array") {
-        declType = glslType(stmt.type.element);
-        declSuffix = `[${stmt.type.size}]`;
-      } else {
-        declType = glslType(stmt.type);
-      }
-      let init = "";
-      if (stmt.initializer) {
-        if (stmt.initializer.kind === "StructLiteral") {
-          const args = stmt.initializer.fields.map((f) => {
-            if (f.name === null) return `..${emitExpression(f.value)}`;
-            return emitExpression(f.value);
-          }).join(", ");
-          init = ` = ${declType}(${args})`;
-        } else {
-          init = ` = ${emitExpression(stmt.initializer)}`;
-        }
-      }
-      lines.push(`${pad}${declType} ${stmt.name}${declSuffix}${init};`);
-      break;
-    }
-    case "ReturnStmt": {
-      if (!stmt.value) {
-        if (outputInfo) {
-          throw new Error("main must return a value");
-        }
-        lines.push(`${pad}return;`);
-        break;
-      }
-      if (outputInfo) {
-        if (outputInfo.fields.length > 0) {
-          lines.push(`${pad}${outputInfo.structName} outVal = ${emitExpression(stmt.value)};`);
-          for (const field of outputInfo.fields) {
-            lines.push(`${pad}${field.name} = outVal.${field.name};`);
-          }
-        } else {
-          if (stmt.value.kind === "StructLiteral") {
-            const args = stmt.value.fields.map((f) => emitExpression(f.value)).join(", ");
-            lines.push(`${pad}fragColor = vec4(${args});`);
-          } else {
-            lines.push(`${pad}fragColor = ${emitExpression(stmt.value)};`);
-          }
-        }
-      } else {
-        lines.push(`${pad}return ${emitExpression(stmt.value)};`);
-      }
-      break;
-    }
-    case "ExpressionStmt": {
-      lines.push(`${pad}${emitExpression(stmt.expression)};`);
-      break;
-    }
-    case "Block": {
-      lines.push(`${pad}{`);
-      for (const s of stmt.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "IfStmt": {
-      lines.push(`${pad}if (${emitExpression(stmt.condition)}) {`);
-      for (const s of stmt.thenBranch.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
-      }
-      lines.push(`${pad}}`);
-      if (stmt.elseBranch) {
-        lines.push(`${pad}else {`);
-        for (const s of stmt.elseBranch.statements) {
-          emitStatement(lines, s, indent + 1, outputInfo);
-        }
-        lines.push(`${pad}}`);
-      }
-      break;
-    }
-    case "WhileStmt": {
-      lines.push(`${pad}while (${emitExpression(stmt.condition)}) {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "ForStmt": {
-      if (stmt.range) {
-        const startCode = emitExpression(stmt.range.start);
-        const endCode = emitExpression(stmt.range.end);
-        const condOp = stmt.range.inclusive ? "<=" : "<";
-        // Loop variable is implicitly an int
-        lines.push(`${pad}for (int __loop_var = ${startCode}; __loop_var ${condOp} ${endCode}; __loop_var++) {`);
-        for (const s of stmt.body.statements) {
-          emitStatement(lines, s, indent + 1, outputInfo);
-        }
-        lines.push(`${pad}}`);
-        break;
-      }
-      let initStr = "";
-      if (stmt.init) {
-        if (stmt.init.kind === "VarDecl") {
-          initStr = emitVarDeclStr(stmt.init);
-        } else if (stmt.init.kind === "ExpressionStmt") {
-          initStr = emitExpression(stmt.init.expression);
-        }
-      }
-      let condStr = stmt.condition ? emitExpression(stmt.condition) : "";
-      let incrStr = stmt.increment ? emitExpression(stmt.increment) : "";
-      lines.push(`${pad}for (${initStr}; ${condStr}; ${incrStr}) {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "DoWhileStmt": {
-      lines.push(`${pad}do {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
-      }
-      lines.push(`${pad}} while (${emitExpression(stmt.condition)});`);
-      break;
-    }
-    case "LoopStmt": {
-      lines.push(`${pad}for (;;) {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "BreakStmt": {
-      lines.push(`${pad}break;`);
-      break;
-    }
-    case "ContinueStmt": {
-      lines.push(`${pad}continue;`);
-      break;
-    }
-    case "PanicStmt": {
-      if (stmt.message) {
-        lines.push(`${pad}// panic: ${emitExpression(stmt.message)}`);
-      } else {
-        lines.push(`${pad}// panic`);
-      }
-      break;
-    }
-    case "UnreachableStmt": {
-      lines.push(`${pad}// unreachable`);
-      break;
-    }
-    case "DiscardStmt": {
-      lines.push(`${pad}discard;`);
-      break;
-    }
-    case "TypeAlias":
-    case "NewtypeDecl":
-    case "OpaqueDecl":
-      // Transparent type aliases: no code emitted
-      break;
+    lines.push(`${pad}};`);
+    return;
   }
+  if (isBindingDecl(stmt)) {
+    let declType: string;
+    let declSuffix = "";
+    if (isArray(stmt.type)) {
+      declType = glslType(stmt.type.element);
+      declSuffix = `[${stmt.type.size}]`;
+    } else {
+      declType = glslType(stmt.type);
+    }
+    const isSamplerBinding = isSampler(stmt.type);
+    const bindingDecl = isSamplerBinding
+      ? `layout(binding = ${stmt.binding}) uniform ${declType} ${stmt.name}${declSuffix};`
+      : `uniform ${declType} ${stmt.name}${declSuffix};`;
+    lines.push(`${pad}${bindingDecl}`);
+    return;
+  }
+  if (isFnDecl(stmt)) {
+    const params = stmt.params
+      .map((p) => `${glslType(p.type)} ${p.name}`)
+      .join(", ");
+    lines.push(`${pad}${glslType(stmt.returnType)} ${stmt.name}(${params}) {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, null);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isVarDecl(stmt)) {
+    let declType: string;
+    let declSuffix = "";
+    if (isArray(stmt.type)) {
+      declType = glslType(stmt.type.element);
+      declSuffix = `[${stmt.type.size}]`;
+    } else {
+      declType = glslType(stmt.type);
+    }
+    let init = "";
+    if (stmt.initializer) {
+      if (isStructLiteral(stmt.initializer)) {
+        const args = stmt.initializer.fields.map((f) => {
+          if (f.name === null) return `..${emitExpression(f.value)}`;
+          return emitExpression(f.value);
+        }).join(", ");
+        init = ` = ${declType}(${args})`;
+      } else {
+        init = ` = ${emitExpression(stmt.initializer)}`;
+      }
+    }
+    lines.push(`${pad}${declType} ${stmt.name}${declSuffix}${init};`);
+    return;
+  }
+  if (isReturnStmt(stmt)) {
+    if (!stmt.value) {
+      if (outputInfo) {
+        throw new Error("main must return a value");
+      }
+      lines.push(`${pad}return;`);
+      return;
+    }
+    if (outputInfo) {
+      if (outputInfo.fields.length > 0) {
+        lines.push(`${pad}${outputInfo.structName} outVal = ${emitExpression(stmt.value)};`);
+        for (const field of outputInfo.fields) {
+          lines.push(`${pad}${field.name} = outVal.${field.name};`);
+        }
+      } else {
+        if (isStructLiteral(stmt.value)) {
+          const args = stmt.value.fields.map((f) => emitExpression(f.value)).join(", ");
+          lines.push(`${pad}fragColor = vec4(${args});`);
+        } else {
+          lines.push(`${pad}fragColor = ${emitExpression(stmt.value)};`);
+        }
+      }
+    } else {
+      lines.push(`${pad}return ${emitExpression(stmt.value)};`);
+    }
+    return;
+  }
+  if (isExpressionStmt(stmt)) {
+    lines.push(`${pad}${emitExpression(stmt.expression)};`);
+    return;
+  }
+  if (isBlock(stmt)) {
+    lines.push(`${pad}{`);
+    for (const s of stmt.statements) {
+      emitStatement(lines, s, indent + 1, outputInfo);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isIfStmt(stmt)) {
+    lines.push(`${pad}if (${emitExpression(stmt.condition)}) {`);
+    for (const s of stmt.thenBranch.statements) {
+      emitStatement(lines, s, indent + 1, outputInfo);
+    }
+    lines.push(`${pad}}`);
+    if (stmt.elseBranch) {
+      lines.push(`${pad}else {`);
+      for (const s of stmt.elseBranch.statements) {
+        emitStatement(lines, s, indent + 1, outputInfo);
+      }
+      lines.push(`${pad}}`);
+    }
+    return;
+  }
+  if (isWhileStmt(stmt)) {
+    lines.push(`${pad}while (${emitExpression(stmt.condition)}) {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, outputInfo);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isForStmt(stmt)) {
+    if (stmt.range) {
+      const startCode = emitExpression(stmt.range.start);
+      const endCode = emitExpression(stmt.range.end);
+      const condOp = stmt.range.inclusive ? "<=" : "<";
+      // Loop variable is implicitly an int
+      lines.push(`${pad}for (int __loop_var = ${startCode}; __loop_var ${condOp} ${endCode}; __loop_var++) {`);
+      for (const s of stmt.body.statements) {
+        emitStatement(lines, s, indent + 1, outputInfo);
+      }
+      lines.push(`${pad}}`);
+      return;
+    }
+    let initStr = "";
+    if (stmt.init) {
+      if (isVarDecl(stmt.init)) {
+        initStr = emitVarDeclStr(stmt.init);
+      } else if (isExpressionStmt(stmt.init)) {
+        initStr = emitExpression(stmt.init.expression);
+      }
+    }
+    let condStr = stmt.condition ? emitExpression(stmt.condition) : "";
+    let incrStr = stmt.increment ? emitExpression(stmt.increment) : "";
+    lines.push(`${pad}for (${initStr}; ${condStr}; ${incrStr}) {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, outputInfo);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isDoWhileStmt(stmt)) {
+    lines.push(`${pad}do {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, outputInfo);
+    }
+    lines.push(`${pad}} while (${emitExpression(stmt.condition)});`);
+    return;
+  }
+  if (isLoopStmt(stmt)) {
+    lines.push(`${pad}for (;;) {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, outputInfo);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isBreakStmt(stmt)) {
+    lines.push(`${pad}break;`);
+    return;
+  }
+  if (isContinueStmt(stmt)) {
+    lines.push(`${pad}continue;`);
+    return;
+  }
+  if (isPanicStmt(stmt)) {
+    if (stmt.message) {
+      lines.push(`${pad}// panic: ${emitExpression(stmt.message)}`);
+    } else {
+      lines.push(`${pad}// panic`);
+    }
+    return;
+  }
+  if (isUnreachableStmt(stmt)) {
+    lines.push(`${pad}// unreachable`);
+    return;
+  }
+  if (isDiscardStmt(stmt)) {
+    lines.push(`${pad}discard;`);
+    return;
+  }
+  // TypeAlias, NewtypeDecl, OpaqueDecl, EnumDecl, ImplBlock, TraitDecl — transparent
 }
 
 /**
@@ -402,7 +440,7 @@ function emitStatement(
 function emitVarDeclStr(stmt: Extract<Statement, { kind: "VarDecl" }>): string {
   let declType: string;
   let declSuffix = "";
-  if (stmt.type.kind === "array") {
+  if (isArray(stmt.type)) {
     declType = glslType(stmt.type.element);
     declSuffix = `[${stmt.type.size}]`;
   } else {
@@ -410,7 +448,7 @@ function emitVarDeclStr(stmt: Extract<Statement, { kind: "VarDecl" }>): string {
   }
   let init = "";
   if (stmt.initializer) {
-    if (stmt.initializer.kind === "StructLiteral") {
+    if (isStructLiteral(stmt.initializer)) {
       const args = stmt.initializer.fields.map((f) => {
         if (f.name === null) return `..${emitExpression(f.value)}`;
         return emitExpression(f.value);
@@ -430,106 +468,119 @@ function emitVarDeclStr(stmt: Extract<Statement, { kind: "VarDecl" }>): string {
  * @returns The GLSL expression string.
  */
 function emitExpression(expr: Expression): string {
-  switch (expr.kind) {
-    case "Identifier":
-      return expr.name;
-    case "Literal":
-      return emitLiteral(expr);
-    case "BinaryExpr":
-      return `(${emitExpression(expr.left)} ${expr.operator} ${emitExpression(expr.right)})`;
-    case "UnaryExpr":
-      return `(${expr.operator}${emitExpression(expr.operand)})`;
-    case "CallExpr": {
-      const calleeName = expr.callee.kind === "Identifier" ? expr.callee.name : emitExpression(expr.callee);
-      const args = expr.args.map(emitExpression).join(", ");
-      const glslBuiltin = glslBuiltinName(calleeName);
-      if (glslBuiltin && glslBuiltin.kind === "builtin") {
-        return `${glslBuiltin.name}(${args})`;
-      }
-      if (glslBuiltin && glslBuiltin.kind === "rotate") {
-        const xExpr = expr.args[0];
-        const sExpr = expr.args[1];
-        if (!xExpr || !sExpr) {
-          throw new Error("rotateLeft/rotateRight require two arguments");
-        }
-        const xCode = emitExpression(xExpr);
-        const sCode = emitExpression(sExpr);
-        const dir = glslBuiltin.dir;
-        return `(${xCode} ${dir === "left" ? "<<" : ">>"} ${sCode}) | (${xCode} ${dir === "left" ? ">>" : "<<"} (32 - ${sCode}))`;
-      }
-      return `${calleeName}(${args})`;
-    }
-    case "MemberExpr":
-      return `${emitExpression(expr.object)}.${expr.property}`;
-    case "SwizzleExpr": {
-      const swizzle = expr.components.join("");
-      return `${emitExpression(expr.object)}.${swizzle}`;
-    }
-    case "IndexExpr":
-      return `${emitExpression(expr.object)}[${emitExpression(expr.index)}]`;
-    case "StructLiteral": {
-      const fields = expr.fields.map((f) => {
-        if (f.name === null) return `..${emitExpression(f.value)}`;
-        return emitExpression(f.value);
-      }).join(", ");
-      return `${expr.typeName}(${fields})`;
-    }
-    case "ArrayLiteral": {
-      const elements = expr.elements.map(emitExpression).join(", ");
-      const elemType = expr.elements.length > 0 ? inferGlslElementType(expr.elements[0]!) : "float";
-      return `${elemType}[${expr.elements.length}](${elements})`;
-    }
-    case "CompoundAssignExpr": {
-      return `(${emitExpression(expr.target)} = ${emitExpression(expr.target)} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value)})`;
-    }
-    case "UpdateExpr": {
-      const op = expr.operator === "++" ? "+ 1" : "- 1";
-      if (expr.prefix) {
-        return `(${emitExpression(expr.operand)} = ${emitExpression(expr.operand)} ${op}, ${emitExpression(expr.operand)})`;
-      }
-      // Postfix: return old value, then update
-      // GLSL doesn't have postfix expression returning old value easily in expression context
-      // For statement context, x++ becomes x = x + 1
-      return `(${emitExpression(expr.operand)} = ${emitExpression(expr.operand)} ${op})`;
-    }
-    case "ConditionalExpr": {
-      return `(${emitExpression(expr.test)} ? ${emitExpression(expr.consequent)} : ${emitExpression(expr.alternate)})`;
-    }
-    case "NullCoalescingExpr": {
-      // GLSL has no null coalescing; approximate with != 0 check for scalars
-      return `(${emitExpression(expr.left)} != 0 ? ${emitExpression(expr.left)} : ${emitExpression(expr.right)})`;
-    }
-    case "MatchExpr": {
-      // Lower match to if-else-if-else chain. Arms contain blocks with statements,
-      // so we emit as a statement sequence assigned to a temp variable when used
-      // as an expression value, or directly when the arms contain returns.
-      const subjectCode = emitExpression(expr.subject);
-      const branches: string[] = [];
-      for (let i = 0; i < expr.arms.length; i++) {
-        const arm = expr.arms[i]!;
-        let condition = "true";
-        if (arm.pattern.kind === "literal" && arm.pattern.value !== null) {
-          condition = `(${subjectCode} == ${arm.pattern.value})`;
-        }
-        const bodyCode = emitMatchBodyToString(arm.body.statements);
-        if (i === expr.arms.length - 1 && arm.pattern.kind === "binding") {
-          branches.push(`else { ${bodyCode} }`);
-        } else {
-          branches.push(`if (${condition}) { ${bodyCode} }`);
-        }
-      }
-      return `(${branches.join(" ")})`;
-    }
-    case "BlockExpr": {
-      const stmts = expr.block.statements;
-      if (stmts.length === 0) return "0.0";
-      const last = stmts[stmts.length - 1]!;
-      if (last.kind === "ExpressionStmt") {
-        return emitExpression(last.expression);
-      }
-      return "0.0";
-    }
+  if (isIdentifier(expr)) {
+    return expr.name;
   }
+  if (isLiteral(expr)) {
+    return emitLiteral(expr);
+  }
+  if (isBinaryExpr(expr)) {
+    return `(${emitExpression(expr.left)} ${expr.operator} ${emitExpression(expr.right)})`;
+  }
+  if (isUnaryExpr(expr)) {
+    return `(${expr.operator}${emitExpression(expr.operand)})`;
+  }
+  if (isCallExpr(expr)) {
+    const calleeName =
+      expr.callee.kind === "Identifier" ? expr.callee.name : emitExpression(expr.callee);
+    const args = expr.args.map(emitExpression).join(", ");
+    const glslBuiltin = glslBuiltinName(calleeName);
+    if (glslBuiltin && glslBuiltin.kind === "builtin") {
+      return `${glslBuiltin.name}(${args})`;
+    }
+    if (glslBuiltin && glslBuiltin.kind === "rotate") {
+      const xExpr = expr.args[0];
+      const sExpr = expr.args[1];
+      if (!xExpr || !sExpr) {
+        throw new Error("rotateLeft/rotateRight require two arguments");
+      }
+      const xCode = emitExpression(xExpr);
+      const sCode = emitExpression(sExpr);
+      const dir = glslBuiltin.dir;
+      return `(${xCode} ${dir === "left" ? "<<" : ">>"} ${sCode}) | (${xCode} ${dir === "left" ? ">>" : "<<"} (32 - ${sCode}))`;
+    }
+    return `${calleeName}(${args})`;
+  }
+  if (isMemberExpr(expr)) {
+    return `${emitExpression(expr.object)}.${expr.property}`;
+  }
+  if (isSwizzleExpr(expr)) {
+    const swizzle = expr.components.join("");
+    return `${emitExpression(expr.object)}.${swizzle}`;
+  }
+  if (isIndexExpr(expr)) {
+    return `${emitExpression(expr.object)}[${emitExpression(expr.index)}]`;
+  }
+  if (isStructLiteral(expr)) {
+    const fields = expr.fields.map((f) => {
+      if (f.name === null) return `..${emitExpression(f.value)}`;
+      return emitExpression(f.value);
+    }).join(", ");
+    return `${expr.typeName}(${fields})`;
+  }
+  if (isArrayLiteral(expr)) {
+    const elements = expr.elements.map(emitExpression).join(", ");
+    const elemType = expr.elements.length > 0 ? inferGlslElementType(expr.elements[0]!) : "float";
+    return `${elemType}[${expr.elements.length}](${elements})`;
+  }
+  if (isCompoundAssignExpr(expr)) {
+    return `(${emitExpression(expr.target)} = ${emitExpression(expr.target)} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value)})`;
+  }
+  if (isUpdateExpr(expr)) {
+    const op = expr.operator === "++" ? "+ 1" : "- 1";
+    if (expr.prefix) {
+      return `(${emitExpression(expr.operand)} = ${emitExpression(expr.operand)} ${op}, ${emitExpression(expr.operand)})`;
+    }
+    return `(${emitExpression(expr.operand)} = ${emitExpression(expr.operand)} ${op})`;
+  }
+  if (isConditionalExpr(expr)) {
+    return `(${emitExpression(expr.test)} ? ${emitExpression(expr.consequent)} : ${emitExpression(expr.alternate)})`;
+  }
+  if (isNullCoalescingExpr(expr)) {
+    return `(${emitExpression(expr.left)} != 0 ? ${emitExpression(expr.left)} : ${emitExpression(expr.right)})`;
+  }
+  if (isMatchExpr(expr)) {
+    const subjectCode = emitExpression(expr.subject);
+    const branches: string[] = [];
+    for (let i = 0; i < expr.arms.length; i++) {
+      const arm = expr.arms[i]!;
+      let condition = "true";
+      if (isLiteralPattern(arm.pattern) && arm.pattern.value !== null) {
+        condition = `(${subjectCode} == ${arm.pattern.value})`;
+      }
+      const bodyCode = emitMatchBodyToString(arm.body.statements);
+      if (i === expr.arms.length - 1 && isBindingPattern(arm.pattern)) {
+        branches.push(`else { ${bodyCode} }`);
+      } else {
+        branches.push(`if (${condition}) { ${bodyCode} }`);
+      }
+    }
+    return `(${branches.join(" ")})`;
+  }
+  if (isBlockExpr(expr)) {
+    const stmts = expr.block.statements;
+    if (stmts.length === 0) return "0.0";
+    const last = stmts[stmts.length - 1]!;
+    if (isExpressionStmt(last)) {
+      return emitExpression(last.expression);
+    }
+    return "0.0";
+  }
+  throw new Error("Cannot emit GLSL expression");
+}
+
+/**
+ * Type guard: literal pattern.
+ */
+function isLiteralPattern(p: { kind: string }): p is { kind: "literal"; value: number | string | boolean } {
+  return p.kind === "literal";
+}
+
+/**
+ * Type guard: binding pattern.
+ */
+function isBindingPattern(p: { kind: string }): p is { kind: "binding"; binding: string } {
+  return p.kind === "binding";
 }
 
 /**
@@ -541,31 +592,31 @@ function emitExpression(expr: Expression): string {
 function emitMatchBodyToString(stmts: Statement[]): string {
   const parts: string[] = [];
   for (const s of stmts) {
-    if (s.kind === "ReturnStmt") {
+    if (isReturnStmt(s)) {
       if (s.value) {
         parts.push(`return ${emitExpression(s.value)};`);
       } else {
         parts.push("return;");
       }
-    } else if (s.kind === "ExpressionStmt") {
+    } else if (isExpressionStmt(s)) {
       parts.push(`${emitExpression(s.expression)};`);
-    } else if (s.kind === "DiscardStmt") {
+    } else if (isDiscardStmt(s)) {
       parts.push("discard;");
-    } else if (s.kind === "PanicStmt") {
+    } else if (isPanicStmt(s)) {
       parts.push(s.message ? `panic ${emitExpression(s.message)};` : "panic;");
-    } else if (s.kind === "UnreachableStmt") {
+    } else if (isUnreachableStmt(s)) {
       parts.push("unreachable;");
-    } else if (s.kind === "BreakStmt") {
+    } else if (isBreakStmt(s)) {
       parts.push("break;");
-    } else if (s.kind === "ContinueStmt") {
+    } else if (isContinueStmt(s)) {
       parts.push("continue;");
-    } else if (s.kind === "Block") {
+    } else if (isBlock(s)) {
       parts.push("{ ");
       for (const inner of s.statements) {
         parts.push(emitMatchBodyToString([inner]));
       }
       parts.push(" }");
-    } else if (s.kind === "IfStmt") {
+    } else if (isIfStmt(s)) {
       parts.push(`if (${emitExpression(s.condition)}) { `);
       for (const inner of s.thenBranch.statements) {
         parts.push(emitMatchBodyToString([inner]));
@@ -578,10 +629,10 @@ function emitMatchBodyToString(stmts: Statement[]): string {
         }
         parts.push(" }");
       }
-    } else if (s.kind === "VarDecl") {
+    } else if (isVarDecl(s)) {
       let init = "";
       if (s.initializer) {
-        if (s.initializer.kind === "StructLiteral") {
+        if (isStructLiteral(s.initializer)) {
           const args = s.initializer.fields.map((f) => emitExpression(f.value)).join(", ");
           init = ` = ${glslType(s.type)}(${args})`;
         } else {
@@ -589,25 +640,25 @@ function emitMatchBodyToString(stmts: Statement[]): string {
         }
       }
       parts.push(`${glslType(s.type)} ${s.name}${init};`);
-    } else if (s.kind === "WhileStmt") {
+    } else if (isWhileStmt(s)) {
       parts.push(`while (${emitExpression(s.condition)}) { `);
       for (const inner of s.body.statements) {
         parts.push(emitMatchBodyToString([inner]));
       }
       parts.push(" }");
-    } else if (s.kind === "ForStmt") {
+    } else if (isForStmt(s)) {
       parts.push("for (;;) { ");
       for (const inner of s.body.statements) {
         parts.push(emitMatchBodyToString([inner]));
       }
       parts.push(" }");
-    } else if (s.kind === "DoWhileStmt") {
+    } else if (isDoWhileStmt(s)) {
       parts.push("do { ");
       for (const inner of s.body.statements) {
         parts.push(emitMatchBodyToString([inner]));
       }
       parts.push(`} while (${emitExpression(s.condition)});`);
-    } else if (s.kind === "LoopStmt") {
+    } else if (isLoopStmt(s)) {
       parts.push("for (;;) { ");
       for (const inner of s.body.statements) {
         parts.push(emitMatchBodyToString([inner]));
@@ -645,18 +696,18 @@ function glslBuiltinName(name: string): { kind: "builtin"; name: string } | { ki
  * @returns The GLSL literal string.
  */
 function emitLiteral(expr: Extract<Expression, { kind: "Literal" }>): string {
-  const { value, literalKind } = expr;
-  if (literalKind === "bool") return value ? "true" : "false";
-  if (literalKind === "int") return `${typeof value === "number" ? value : Number(value)}`;
-  if (literalKind === "float") {
+  const { value } = expr;
+  if (isLiteralOfKind(expr, "bool")) return value ? "true" : "false";
+  if (isLiteralOfKind(expr, "int")) return `${typeof value === "number" ? value : Number(value)}`;
+  if (isLiteralOfKind(expr, "float")) {
     const f = typeof value === "number" ? value : Number(value);
     if (Number.isInteger(f)) return `${f}.0`;
     return String(f);
   }
-  if (literalKind === "char") {
+  if (isLiteralOfKind(expr, "char")) {
     return charToCode(typeof value === "string" ? value : String(value)).toString();
   }
-  if (literalKind === "color") {
+  if (isLiteralOfKind(expr, "color")) {
     return `0x${typeof value === "string" ? value : String(value)}`;
   }
   return String(value);
@@ -689,14 +740,14 @@ function charToCode(s: string): number {
  * @returns The GLSL element type string.
  */
 function inferGlslElementType(expr: Expression): string {
-  if (expr.kind === "Literal") {
-    if (expr.literalKind === "int") return "int";
-    if (expr.literalKind === "float") return "float";
-    if (expr.literalKind === "bool") return "bool";
+  if (isLiteral(expr)) {
+    if (isLiteralOfKind(expr, "int")) return "int";
+    if (isLiteralOfKind(expr, "float")) return "float";
+    if (isLiteralOfKind(expr, "bool")) return "bool";
   }
-  if (expr.kind === "CallExpr") {
+  if (isCallExpr(expr)) {
     const callee = expr.callee;
-    if (callee.kind === "Identifier") {
+    if (isIdentifier(callee)) {
       const name = callee.name;
       if (name.startsWith("mat")) {
         let base = name;

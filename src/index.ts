@@ -7,15 +7,6 @@ import {
   Program,
   Statement,
   ImportDecl,
-  StructDecl,
-  FnDecl,
-  BindingDecl,
-  EnumDecl,
-  ImplBlock,
-  TraitDecl,
-  TypeAlias,
-  NewtypeDecl,
-  OpaqueDecl,
 } from "./types";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
@@ -37,7 +28,7 @@ export {
   rangeForStmt, doWhileStmt, loopStmt, breakStmt, continueStmt,
   discardStmt, panicStmt, unreachableStmt,
   // Expressions
-  ident, int, float, bool as boolLiteral, binary, unary, call, member,
+  ident, int, float, boolLiteral, binary, unary, call, member,
   swizzle, index, structLiteral, arrayLiteral, compoundAssign, update,
   conditional, nullCoalescing, match, blockExpr,
   // Patterns
@@ -61,12 +52,15 @@ export interface CompileOptions {
 }
 
 /**
- * Result of compiling a gl source file or AST.
+ * Result of compiling a gl source file or AST, indexed by target.
+ * The `target` field is a phantom type that lets consumers narrow
+ * the result to a specific backend at the type level.
  */
-export interface CompileResult {
+export interface CompileResult<Target extends "glsl" | "wgsl" = "glsl" | "wgsl"> {
   code: string | null;
   ast: Program;
   diagnostics: Diagnostic[];
+  target: Target;
 }
 
 /**
@@ -80,18 +74,58 @@ function formatError(err: unknown): string {
 }
 
 /**
+ * Generic declaration registry. Replaces the previous pattern of ten
+ * parallel Map variables with a single generic store keyed by declaration
+ * kind and name. Adding a new declaration kind requires no changes here.
+ */
+class DeclarationRegistry {
+  private maps = new Map<string, Map<string, unknown>>();
+
+  private mapFor(kind: string): Map<string, unknown> {
+    let m = this.maps.get(kind);
+    if (!m) {
+      m = new Map();
+      this.maps.set(kind, m);
+    }
+    return m;
+  }
+
+  /** Returns true if a declaration of the given kind and key exists. */
+  has(kind: string, key: string): boolean {
+    return this.mapFor(kind).has(key);
+  }
+
+  /** Stores a declaration, returning true if it was newly added. */
+  set<T extends { kind: string }>(decl: T, key: string): boolean {
+    const m = this.mapFor(decl.kind);
+    if (m.has(key)) return false;
+    m.set(key, decl);
+    return true;
+  }
+
+  /** Retrieves a declaration by kind and key. */
+  get<T extends { kind: string }>(kind: string, key: string): T | undefined {
+    return this.mapFor(kind).get(key) as T | undefined;
+  }
+
+  /** Returns all declarations of a given kind. */
+  getAll(kind: string): unknown[] {
+    const m = this.mapFor(kind);
+    return Array.from(m.values());
+  }
+}
+
+/**
  * Recursively collects declarations from a source file and its imports.
  *
- * Processes imports depth-first, then collects local struct, function, and
- * binding declarations into the provided maps. Top-level executable
- * statements are appended to allStatements.
+ * Processes imports depth-first, then collects local declarations into
+ * the generic registry. Top-level executable statements are appended to
+ * allStatements.
  *
  * @param source - The gl source text.
  * @param file - The source file path (used for import resolution).
  * @param visited - Set of already-visited resolved paths (prevents cycles).
- * @param structs - Map accumulating struct declarations.
- * @param functions - Map accumulating function declarations.
- * @param bindings - Map accumulating binding declarations.
+ * @param registry - Generic declaration registry.
  * @param allStatements - Array accumulating all top-level statements.
  * @param isMainFile - Whether this is the main entry file (affects main fn handling).
  */
@@ -99,15 +133,7 @@ function collectDeclarations(
   source: string,
   file: string,
   visited: Set<string>,
-  structs: Map<string, StructDecl>,
-  functions: Map<string, FnDecl>,
-  bindings: Map<string, BindingDecl>,
-  enums: Map<string, EnumDecl>,
-  impls: Map<string, ImplBlock>,
-  traits: Map<string, TraitDecl>,
-  aliases: Map<string, TypeAlias>,
-  newtypes: Map<string, NewtypeDecl>,
-  opaques: Map<string, OpaqueDecl>,
+  registry: DeclarationRegistry,
   allStatements: Statement[],
   isMainFile: boolean,
 ): void {
@@ -138,15 +164,7 @@ function collectDeclarations(
       importSource,
       importPath,
       visited,
-      structs,
-      functions,
-      bindings,
-      enums,
-      impls,
-      traits,
-      aliases,
-      newtypes,
-      opaques,
+      registry,
       allStatements,
       false
     );
@@ -154,52 +172,27 @@ function collectDeclarations(
 
   // Collect local declarations
   for (const stmt of localStatements) {
-    if (stmt.kind === "StructDecl") {
-      if (!structs.has(stmt.name)) {
-        structs.set(stmt.name, stmt);
-        allStatements.push(stmt);
-      }
-    } else if (stmt.kind === "FnDecl") {
+    if (stmt.kind === "FnDecl") {
       // Skip main from non-main files
       if (!isMainFile && stmt.name === "main") continue;
-      if (!functions.has(stmt.name)) {
-        functions.set(stmt.name, stmt);
+      if (registry.set(stmt, stmt.name)) {
         allStatements.push(stmt);
       }
-    } else if (stmt.kind === "BindingDecl") {
-      if (!bindings.has(stmt.name)) {
-        bindings.set(stmt.name, stmt);
-        allStatements.push(stmt);
-      }
-    } else if (stmt.kind === "EnumDecl") {
-      if (!enums.has(stmt.name)) {
-        enums.set(stmt.name, stmt);
+    } else if (
+      stmt.kind === "StructDecl" ||
+      stmt.kind === "BindingDecl" ||
+      stmt.kind === "EnumDecl" ||
+      stmt.kind === "TraitDecl" ||
+      stmt.kind === "TypeAlias" ||
+      stmt.kind === "NewtypeDecl" ||
+      stmt.kind === "OpaqueDecl"
+    ) {
+      if (registry.set(stmt, stmt.name)) {
         allStatements.push(stmt);
       }
     } else if (stmt.kind === "ImplBlock") {
       const typeKey = stmt.type.kind === "struct" ? stmt.type.name : JSON.stringify(stmt.type);
-      if (!impls.has(typeKey)) {
-        impls.set(typeKey, stmt);
-        allStatements.push(stmt);
-      }
-    } else if (stmt.kind === "TraitDecl") {
-      if (!traits.has(stmt.name)) {
-        traits.set(stmt.name, stmt);
-        allStatements.push(stmt);
-      }
-    } else if (stmt.kind === "TypeAlias") {
-      if (!aliases.has(stmt.name)) {
-        aliases.set(stmt.name, stmt);
-        allStatements.push(stmt);
-      }
-    } else if (stmt.kind === "NewtypeDecl") {
-      if (!newtypes.has(stmt.name)) {
-        newtypes.set(stmt.name, stmt);
-        allStatements.push(stmt);
-      }
-    } else if (stmt.kind === "OpaqueDecl") {
-      if (!opaques.has(stmt.name)) {
-        opaques.set(stmt.name, stmt);
+      if (registry.set(stmt, typeKey)) {
         allStatements.push(stmt);
       }
     } else {
@@ -218,13 +211,13 @@ function collectDeclarations(
  * @param ast - The Program AST to compile.
  * @param file - The source file path (used for diagnostics).
  * @param target - The target language ("glsl" or "wgsl").
- * @returns CompileResult containing generated code (or null on error), the AST, and diagnostics.
+ * @returns CompileResult indexed by the target.
  */
-function compileProgram(
+function compileProgram<Target extends "glsl" | "wgsl">(
   ast: Program,
   file: string,
-  target: "glsl" | "wgsl",
-): CompileResult {
+  target: Target,
+): CompileResult<Target> {
   const diagnostics: Diagnostic[] = [];
 
   try {
@@ -236,7 +229,7 @@ function compileProgram(
       span: { line: 1, column: 1 },
       message: formatError(err),
     });
-    return { code: null, ast, diagnostics };
+    return { code: null, ast, diagnostics, target } as CompileResult<Target>;
   }
 
   const hasErrors = diagnostics.length > 0;
@@ -260,11 +253,11 @@ function compileProgram(
         span: { line: 1, column: 1 },
         message: formatError(err),
       });
-      return { code: null, ast, diagnostics };
+      return { code: null, ast, diagnostics, target } as CompileResult<Target>;
     }
   }
 
-  return { code, ast, diagnostics };
+  return { code, ast, diagnostics, target } as CompileResult<Target>;
 }
 
 /**
@@ -276,9 +269,11 @@ function compileProgram(
  * code generation directly on the supplied AST.
  *
  * @param options - Compilation options (target, file, and either `source` or `ast`).
- * @returns CompileResult containing generated code (or null on error), the AST, and diagnostics.
+ * @returns CompileResult indexed by the target.
  */
-export function compile(options: CompileOptions): CompileResult {
+export function compile<Target extends "glsl" | "wgsl">(
+  options: CompileOptions & { target: Target },
+): CompileResult<Target> {
   const { target, file } = options;
 
   // AST-based path: skip parsing / imports
@@ -299,18 +294,11 @@ export function compile(options: CompileOptions): CompileResult {
           message: "Either 'source' or 'ast' must be provided",
         },
       ],
-    };
+      target,
+    } as CompileResult<Target>;
   }
 
-  const structs = new Map<string, StructDecl>();
-  const functions = new Map<string, FnDecl>();
-  const bindings = new Map<string, BindingDecl>();
-  const enums = new Map<string, EnumDecl>();
-  const impls = new Map<string, ImplBlock>();
-  const traits = new Map<string, TraitDecl>();
-  const aliases = new Map<string, TypeAlias>();
-  const newtypes = new Map<string, NewtypeDecl>();
-  const opaques = new Map<string, OpaqueDecl>();
+  const registry = new DeclarationRegistry();
   const allStatements: Statement[] = [];
   const visited = new Set<string>();
   const diagnostics: Diagnostic[] = [];
@@ -320,15 +308,7 @@ export function compile(options: CompileOptions): CompileResult {
       source,
       file,
       visited,
-      structs,
-      functions,
-      bindings,
-      enums,
-      impls,
-      traits,
-      aliases,
-      newtypes,
-      opaques,
+      registry,
       allStatements,
       true
     );
@@ -342,16 +322,17 @@ export function compile(options: CompileOptions): CompileResult {
       code: null,
       ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
       diagnostics,
-    };
+      target,
+    } as CompileResult<Target>;
   }
 
-  const ast: Program = {
+  const programAst: Program = {
     kind: "Program",
     statements: allStatements,
     span: { line: 1, column: 1 },
   };
 
-  return compileProgram(ast, file, target);
+  return compileProgram(programAst, file, target);
 }
 
 export { tokenize, parse, typeCheck, generateGLSL, generateWGSL };

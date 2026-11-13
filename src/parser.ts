@@ -503,21 +503,22 @@ export class Parser {
   private parsePattern(): Pattern {
     if (this.match("Ref")) {
       const sub = this.parsePattern();
-      return { kind: "ref", binding: null, value: null, subPatterns: [sub], span: sub.span };
+      return { kind: "ref", subPatterns: [sub], span: sub.span };
     }
     if (this.match("Deref")) {
       const sub = this.parsePattern();
-      return { kind: "deref", binding: null, value: null, subPatterns: [sub], span: sub.span };
+      return { kind: "deref", subPatterns: [sub], span: sub.span };
     }
     if (this.match("Ident")) {
       const name = this.previous().lexeme;
+      const startSpan = this.spanOf(this.previous());
       if (name === "_") {
-        return { kind: "wildcard", binding: null, value: null, subPatterns: [], span: this.spanOf(this.previous()) };
+        return { kind: "wildcard", span: startSpan };
       }
-      return { kind: "binding", binding: name, value: null, subPatterns: [], span: this.spanOf(this.previous()) };
+      return { kind: "binding", binding: name, span: startSpan };
     }
     if (this.match("Int")) {
-      return { kind: "literal", binding: null, value: this.parseIntLiteral(this.previous().lexeme), subPatterns: [], span: this.spanOf(this.previous()) };
+      return { kind: "literal", value: this.parseIntLiteral(this.previous().lexeme), span: this.spanOf(this.previous()) };
     }
     if (this.match("LBrace")) {
       const startSpan = this.spanOf(this.previous());
@@ -527,7 +528,7 @@ export class Parser {
         if (!this.check("RBrace")) this.consume("Comma", "Expect ',' after pattern.");
       }
       this.consume("RBrace", "Expect '}' after struct pattern.");
-      return { kind: "struct", binding: null, value: null, subPatterns, span: startSpan };
+      return { kind: "struct", subPatterns, span: startSpan };
     }
     if (this.match("LParen")) {
       const startSpan = this.spanOf(this.previous());
@@ -537,7 +538,7 @@ export class Parser {
         if (!this.check("RParen")) this.consume("Comma", "Expect ',' after pattern.");
       }
       this.consume("RParen", "Expect ')' after tuple pattern.");
-      return { kind: "tuple", binding: null, value: null, subPatterns, span: startSpan };
+      return { kind: "tuple", subPatterns, span: startSpan };
     }
     if (this.match("LBracket")) {
       const startSpan = this.spanOf(this.previous());
@@ -547,7 +548,7 @@ export class Parser {
         if (!this.check("RBracket")) this.consume("Comma", "Expect ',' after pattern.");
       }
       this.consume("RBracket", "Expect ']' after array pattern.");
-      return { kind: "array", binding: null, value: null, subPatterns, span: startSpan };
+      return { kind: "array", subPatterns, span: startSpan };
     }
     throw new ParseError(this.peek(), "Expect pattern.");
   }

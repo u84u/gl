@@ -9,6 +9,27 @@ import {
   BindingDecl,
   Block,
   ArrayLiteral,
+  // Type guards
+  isScalar,
+  isVector,
+  isMatrix,
+  isStructType,
+  isSampler,
+  isArray,
+  isAbstractInt,
+  isAbstractFloat,
+  // Statement guards
+  isStructDecl,
+  isFnDecl,
+  isVarDecl,
+  isBindingDecl,
+  isExpressionStmt,
+  // Expression guards (only ones used outside visitor)
+  isIdentifier,
+  isLiteralOfKind,
+  // Visitor
+  visitStatement,
+  visitExpression,
 } from "./types";
 
 export interface Diagnostic {
@@ -93,35 +114,24 @@ function define(ctx: TypeCheckContext, symbol: Symbol): void {
  * @returns A string representation of the type.
  */
 function typeName(t: Type): string {
-  switch (t.kind) {
-    case "abstractInt": return "abstract int";
-    case "abstractFloat": return "abstract float";
-    case "scalar": return t.name;
-    case "vector": return `vec${t.size}`;
-    case "matrix": return `mat${t.rows}x${t.columns}`;
-    case "struct": return t.name;
-    case "enum": return `enum ${t.name}`;
-    case "sampler": return t.name;
-    case "array": return `${typeName(t.element)}[${t.size}]`;
-    case "quaternion": return "quat";
-    case "tuple": return `(${t.elements.map(typeName).join(", ")})`;
-    case "option": return `Option<${typeName(t.element)}>`;
-    case "result": return `Result<${typeName(t.ok)}, ${typeName(t.err)}>`;
-    case "alias": return t.name;
-    case "opaque": return `opaque ${t.name}`;
-    case "anonymousStruct": return `{ ${t.fields.map(f => `${f.name}: ${typeName(f.type)}`).join(", ")} }`;
-    case "union": return t.members.map(typeName).join(" | ");
-  }
-}
-
-/**
- * Checks whether a type is a sampler type.
- *
- * @param t - The type to check.
- * @returns true if the type is a sampler, false otherwise.
- */
-function isSamplerType(t: Type): boolean {
-  return t.kind === "sampler";
+  if (isAbstractInt(t)) return "abstract int";
+  if (isAbstractFloat(t)) return "abstract float";
+  if (isScalar(t)) return t.name;
+  if (isVector(t)) return `vec${t.size}`;
+  if (isMatrix(t)) return `mat${t.rows}x${t.columns}`;
+  if (t.kind === "quaternion") return "quat";
+  if (isStructType(t)) return t.name;
+  if (t.kind === "enum") return `enum ${t.name}`;
+  if (isSampler(t)) return t.name;
+  if (isArray(t)) return `${typeName(t.element)}[${t.size}]`;
+  if (t.kind === "tuple") return `(${t.elements.map(typeName).join(", ")})`;
+  if (t.kind === "option") return `Option<${typeName(t.element)}>`;
+  if (t.kind === "result") return `Result<${typeName(t.ok)}, ${typeName(t.err)}>`;
+  if (t.kind === "alias") return t.name;
+  if (t.kind === "opaque") return `opaque ${t.name}`;
+  if (t.kind === "anonymousStruct") return `{ ${t.fields.map(f => `${f.name}: ${typeName(f.type)}`).join(", ")} }`;
+  if (t.kind === "union") return t.members.map(typeName).join(" | ");
+  return "unknown";
 }
 
 /**
@@ -131,8 +141,8 @@ function isSamplerType(t: Type): boolean {
  * @returns true if a sampler is found anywhere in the type structure.
  */
 function containsSampler(t: Type): boolean {
-  if (isSamplerType(t)) return true;
-  if (t.kind === "array") return containsSampler(t.element);
+  if (isSampler(t)) return true;
+  if (isArray(t)) return containsSampler(t.element);
   return false;
 }
 
@@ -145,21 +155,37 @@ function containsSampler(t: Type): boolean {
  * @throws Error if the abstract type cannot be concretized to the target.
  */
 function concretize(abstractType: Type, targetType: Type): Type {
-  if (abstractType.kind === "abstractInt") {
-    if (targetType.kind === "scalar") {
+  if (isAbstractInt(abstractType)) {
+    if (isScalar(targetType)) {
       return targetType;
     }
-    if (targetType.kind === "vector") {
-      return { kind: "scalar", name: targetType.element === "bool" ? "i32" : targetType.element };
+    if (isVector(targetType)) {
+      const v = targetType as Extract<Type, { kind: "vector" }>;
+      return { kind: "scalar", name: v.element === "bool" ? "i32" : v.element };
     }
     throw new Error(`Cannot concretize abstract int to ${typeName(targetType)}`);
   }
-  if (abstractType.kind === "abstractFloat") {
-    if (targetType.kind === "scalar" && targetType.name !== "bool" && targetType.name !== "i32" && targetType.name !== "u32" && targetType.name !== "i64" && targetType.name !== "u64") {
+  if (isAbstractFloat(abstractType)) {
+    if (
+      isScalar(targetType) &&
+      targetType.name !== "bool" &&
+      targetType.name !== "i32" &&
+      targetType.name !== "u32" &&
+      targetType.name !== "i64" &&
+      targetType.name !== "u64"
+    ) {
       return targetType;
     }
-    if (targetType.kind === "vector" && targetType.element !== "bool" && targetType.element !== "i32" && targetType.element !== "u32" && targetType.element !== "i64" && targetType.element !== "u64") {
-      return { kind: "scalar", name: targetType.element };
+    if (
+      isVector(targetType) &&
+      targetType.element !== "bool" &&
+      targetType.element !== "i32" &&
+      targetType.element !== "u32" &&
+      targetType.element !== "i64" &&
+      targetType.element !== "u64"
+    ) {
+      const v = targetType as Extract<Type, { kind: "vector" }>;
+      return { kind: "scalar", name: v.element };
     }
     throw new Error(`Cannot concretize abstract float to ${typeName(targetType)}`);
   }
@@ -178,11 +204,14 @@ function concretize(abstractType: Type, targetType: Type): Type {
 function concretify(
   ctx: TypeCheckContext,
   expr: Expression,
-  expectedType: Type
+  expectedType: Type,
 ): { expr: Expression; type: Type } | null {
   const type = typeOf(ctx, expr);
-  if ((type.kind === "abstractInt" || type.kind === "abstractFloat") &&
-      expectedType.kind !== "abstractInt" && expectedType.kind !== "abstractFloat") {
+  if (
+    (isAbstractInt(type) || isAbstractFloat(type)) &&
+    !isAbstractInt(expectedType) &&
+    !isAbstractFloat(expectedType)
+  ) {
     let concretized: Type;
     try {
       concretized = concretize(type, expectedType);
@@ -192,9 +221,10 @@ function concretify(
     return { expr, type: concretized };
   }
   // Array concretization: concretize array elements against expected element type
-  if (type.kind === "array" && expectedType.kind === "array" &&
-      (type.element.kind === "abstractInt" || type.element.kind === "abstractFloat") &&
-      expectedType.element.kind !== "abstractInt" && expectedType.element.kind !== "abstractFloat") {
+  if (isArray(type) && isArray(expectedType) &&
+      (isAbstractInt(type.element) || isAbstractFloat(type.element)) &&
+      !isAbstractInt(expectedType.element) &&
+      !isAbstractFloat(expectedType.element)) {
     const arr = expr as ArrayLiteral;
     const newElements = arr.elements.map((e) => {
       const result = concretify(ctx, e, expectedType.element);
@@ -214,391 +244,391 @@ function concretify(
  * @returns The inferred Type, or a default error type ({ kind: "scalar", name: "f32" }) on failure.
  */
 function typeOf(ctx: TypeCheckContext, expr: Expression): Type {
-  if (expr.kind === "Identifier") {
-    const sym = lookup(ctx, expr.name);
-    if (!sym) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Undeclared identifier '${expr.name}'`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    return sym.type;
-  }
-  if (expr.kind === "Literal") {
-    if (expr.literalKind === "bool") return { kind: "scalar", name: "bool" };
-    if (expr.literalKind === "int") return { kind: "abstractInt" };
-    if (expr.literalKind === "float") return { kind: "abstractFloat" };
-    if (expr.literalKind === "char") return { kind: "scalar", name: "i32" };
-    if (expr.literalKind === "color") return { kind: "scalar", name: "u32" };
-    return { kind: "scalar", name: "f32" };
-  }
-  if (expr.kind === "BinaryExpr") {
-    const left = typeOf(ctx, expr.left);
-    const right = typeOf(ctx, expr.right);
-    return checkBinaryOp(ctx, left, right, expr.operator, expr.span);
-  }
-  if (expr.kind === "UnaryExpr") {
-    const operand = typeOf(ctx, expr.operand);
-    return checkUnaryOp(ctx, operand, expr.operator, expr.span);
-  }
-  if (expr.kind === "CallExpr") {
-    const callee = expr.callee;
-    if (callee.kind !== "Identifier") {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: "Cannot call non-identifier expression",
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    const sym = lookup(ctx, callee.name);
-    if (!sym) {
-      const builtin = checkBuiltinCall(ctx, callee.name, expr.args, expr.span);
-      if (builtin) return builtin;
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Undeclared function '${callee.name}'`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    if (sym.kind !== "function") {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Not a function: ${callee.name}`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    const fnDecl = ctx.functions.get(callee.name);
-    if (!fnDecl) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Function '${callee.name}' not found`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    return checkUserCall(ctx, fnDecl, expr.args, expr.span);
-  }
-  if (expr.kind === "MemberExpr") {
-    const objectType = typeOf(ctx, expr.object);
-    if (objectType.kind === "struct") {
-      const structDecl = ctx.structs.get(objectType.name);
-      if (!structDecl) {
+  return visitExpression(expr, {
+    visitIdentifier: (node) => {
+      const sym = lookup(ctx, node.name);
+      if (!sym) {
         ctx.diagnostics.push({
           file: ctx.file,
-          span: expr.span,
-          message: `Unknown struct '${objectType.name}'`,
+          span: node.span,
+          message: `Undeclared identifier '${node.name}'`,
         });
         return { kind: "scalar", name: "f32" };
       }
-      const field = structDecl.fields.find((f) => f.name === expr.property);
-      if (!field) {
+      return sym.type;
+    },
+    visitLiteral: (node) => {
+      if (isLiteralOfKind(node, "bool")) return { kind: "scalar", name: "bool" };
+      if (isLiteralOfKind(node, "int")) return { kind: "abstractInt" };
+      if (isLiteralOfKind(node, "float")) return { kind: "abstractFloat" };
+      if (isLiteralOfKind(node, "char")) return { kind: "scalar", name: "i32" };
+      if (isLiteralOfKind(node, "color")) return { kind: "scalar", name: "u32" };
+      return { kind: "scalar", name: "f32" };
+    },
+    visitBinaryExpr: (node) => {
+      const left = typeOf(ctx, node.left);
+      const right = typeOf(ctx, node.right);
+      return checkBinaryOp(ctx, left, right, node.operator, node.span);
+    },
+    visitUnaryExpr: (node) => {
+      const operand = typeOf(ctx, node.operand);
+      return checkUnaryOp(ctx, operand, node.operator, node.span);
+    },
+    visitCallExpr: (node) => {
+      const callee = node.callee;
+      if (!isIdentifier(callee)) {
         ctx.diagnostics.push({
           file: ctx.file,
-          span: expr.span,
-          message: `Struct '${objectType.name}' has no field '${expr.property}'`,
+          span: node.span,
+          message: "Cannot call non-identifier expression",
         });
         return { kind: "scalar", name: "f32" };
       }
-      return field.type;
-    }
-    if (objectType.kind === "vector") {
-      if (expr.property.length === 1 && SWIZZLE_VALID.has(expr.property)) {
-      return { kind: "scalar", name: objectType.element! };
-      }
-    }
-    if (expr.property.length >= 1 && expr.property.length <= 4) {
-      const allValid = expr.property.split("").every((c) => SWIZZLE_VALID.has(c));
-      if (allValid) {
+      const sym = lookup(ctx, callee.name);
+      if (!sym) {
+        const builtin = checkBuiltinCall(ctx, callee.name, node.args, node.span);
+        if (builtin) return builtin;
         ctx.diagnostics.push({
           file: ctx.file,
-          span: expr.span,
+          span: node.span,
+          message: `Undeclared function '${callee.name}'`,
+        });
+        return { kind: "scalar", name: "f32" };
+      }
+      if (sym.kind !== "function") {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Not a function: ${callee.name}`,
+        });
+        return { kind: "scalar", name: "f32" };
+      }
+      const fnDecl = ctx.functions.get(callee.name);
+      if (!fnDecl) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Function '${callee.name}' not found`,
+        });
+        return { kind: "scalar", name: "f32" };
+      }
+      return checkUserCall(ctx, fnDecl, node.args, node.span);
+    },
+    visitMemberExpr: (node) => {
+      const objectType = typeOf(ctx, node.object);
+      if (isStructType(objectType)) {
+        const structDecl = ctx.structs.get(objectType.name);
+        if (!structDecl) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: node.span,
+            message: `Unknown struct '${objectType.name}'`,
+          });
+          return { kind: "scalar", name: "f32" };
+        }
+        const field = structDecl.fields.find((f) => f.name === node.property);
+        if (!field) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: node.span,
+            message: `Struct '${objectType.name}' has no field '${node.property}'`,
+          });
+          return { kind: "scalar", name: "f32" };
+        }
+        return field.type;
+      }
+      if (isVector(objectType)) {
+        if (node.property.length === 1 && SWIZZLE_VALID.has(node.property)) {
+          return { kind: "scalar", name: objectType.element };
+        }
+      }
+      if (node.property.length >= 1 && node.property.length <= 4) {
+        const allValid = node.property.split("").every((c) => SWIZZLE_VALID.has(c));
+        if (allValid) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: node.span,
+            message: `Cannot swizzle non-vector type ${typeName(objectType)}`,
+          });
+          return { kind: "scalar", name: "f32" };
+        }
+      }
+      ctx.diagnostics.push({
+        file: ctx.file,
+        span: node.span,
+        message: `Cannot access field '${node.property}' on non-struct type ${typeName(objectType)}`,
+      });
+      return { kind: "scalar", name: "f32" };
+    },
+    visitSwizzleExpr: (node) => {
+      const objectType = typeOf(ctx, node.object);
+      if (!isVector(objectType)) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
           message: `Cannot swizzle non-vector type ${typeName(objectType)}`,
         });
         return { kind: "scalar", name: "f32" };
       }
-    }
-    ctx.diagnostics.push({
-      file: ctx.file,
-      span: expr.span,
-      message: `Cannot access field '${expr.property}' on non-struct type ${typeName(objectType)}`,
-    });
-    return { kind: "scalar", name: "f32" };
-  }
-  if (expr.kind === "SwizzleExpr") {
-    const objectType = typeOf(ctx, expr.object);
-    if (objectType.kind !== "vector") {
+      const components = node.components;
+      const allValid = components.every((c) => SWIZZLE_VALID.has(c));
+      if (!allValid) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Cannot access field '${components.join("")}' on non-struct type ${typeName(objectType)}`,
+        });
+        return { kind: "scalar", name: "f32" };
+      }
+      const xyzw = new Set("xyzw");
+      const rgba = new Set("rgba");
+      const usesXYZW = components.some((c) => xyzw.has(c));
+      const usesRGBA = components.some((c) => rgba.has(c));
+      if (usesXYZW && usesRGBA) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: "Cannot mix xyzw and rgba swizzle components",
+        });
+        return { kind: "scalar", name: "f32" };
+      }
+      if (components.length > objectType.size) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Swizzle of length ${components.length} on ${typeName(objectType)}`,
+        });
+        return { kind: "scalar", name: "f32" };
+      }
+      if (components.length === 1) {
+        return { kind: "scalar", name: objectType.element };
+      }
+      return { kind: "vector", element: objectType.element, size: components.length as 2 | 3 | 4 };
+    },
+    visitIndexExpr: (node) => {
+      const objectType = typeOf(ctx, node.object);
+      const indexType = typeOf(ctx, node.index);
+      if (!(isScalar(indexType) && indexType.name === "i32") && !isAbstractInt(indexType)) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.index.span,
+          message: `Array index must be i32, got ${typeName(indexType)}`,
+        });
+      }
+      if (isArray(objectType)) {
+        return objectType.element;
+      }
+      if (isVector(objectType)) {
+        return { kind: "scalar", name: objectType.element };
+      }
       ctx.diagnostics.push({
         file: ctx.file,
-        span: expr.span,
-        message: `Cannot swizzle non-vector type ${typeName(objectType)}`,
+        span: node.span,
+        message: `Cannot index non-array type ${typeName(objectType)}`,
       });
       return { kind: "scalar", name: "f32" };
-    }
-    const components = expr.components;
-    const allValid = components.every((c) => SWIZZLE_VALID.has(c));
-    if (!allValid) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Cannot access field '${components.join("")}' on non-struct type ${typeName(objectType)}`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    // Check for mixing xyzw and rgba components
-    const xyzw = new Set("xyzw");
-    const rgba = new Set("rgba");
-    const usesXYZW = components.some((c) => xyzw.has(c));
-    const usesRGBA = components.some((c) => rgba.has(c));
-    if (usesXYZW && usesRGBA) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: "Cannot mix xyzw and rgba swizzle components",
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    // Check swizzle length against vector size
-    if (components.length > objectType.size) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Swizzle of length ${components.length} on ${typeName(objectType)}`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    if (components.length === 1) {
-      return { kind: "scalar", name: objectType.element! };
-    }
-    return { kind: "vector", element: objectType.element!, size: components.length as 2 | 3 | 4 };
-  }
-  if (expr.kind === "IndexExpr") {
-    const objectType = typeOf(ctx, expr.object);
-    const indexType = typeOf(ctx, expr.index);
-    if (!(indexType.kind === "scalar" && indexType.name === "i32") && indexType.kind !== "abstractInt") {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.index.span,
-        message: `Array index must be i32, got ${typeName(indexType)}`,
-      });
-    }
-    if (objectType.kind === "array") {
-      return objectType.element;
-    }
-    if (objectType.kind === "vector") {
-      return { kind: "scalar", name: objectType.element! };
-    }
-    ctx.diagnostics.push({
-      file: ctx.file,
-      span: expr.span,
-      message: `Cannot index non-array type ${typeName(objectType)}`,
-    });
-    return { kind: "scalar", name: "f32" };
-  }
-  if (expr.kind === "StructLiteral") {
-    const structDecl = ctx.structs.get(expr.typeName);
-    if (!structDecl) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Unknown struct '${expr.typeName}'`,
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    const declaredFields = new Map(structDecl.fields.map((f) => [f.name, f.type]));
-    const seenFields = new Set<string>();
-    for (const field of expr.fields) {
-      if (field.name === null) continue; // spread, skip field validation
-      if (seenFields.has(field.name)) {
+    },
+    visitStructLiteral: (node) => {
+      const structDecl = ctx.structs.get(node.typeName);
+      if (!structDecl) {
         ctx.diagnostics.push({
           file: ctx.file,
-          span: field.value.span,
-          message: `Duplicate field '${field.name}' in struct literal`,
+          span: node.span,
+          message: `Unknown struct '${node.typeName}'`,
         });
-        continue;
+        return { kind: "scalar", name: "f32" };
       }
-      seenFields.add(field.name);
-      const expected = declaredFields.get(field.name);
-      if (!expected) {
+      const declaredFields = new Map(structDecl.fields.map((f) => [f.name, f.type]));
+      const seenFields = new Set<string>();
+      for (const field of node.fields) {
+        if (field.name === null) continue; // spread, skip field validation
+        if (seenFields.has(field.name)) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: field.value.span,
+            message: `Duplicate field '${field.name}' in struct literal`,
+          });
+          continue;
+        }
+        seenFields.add(field.name);
+        const expected = declaredFields.get(field.name);
+        if (!expected) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: field.value.span,
+            message: `Struct '${node.typeName}' has no field '${field.name}'`,
+          });
+          continue;
+        }
+        const concretized = concretify(ctx, field.value, expected);
+        if (!concretized) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: field.value.span,
+            message: `Cannot convert field '${field.name}' to ${typeName(expected)}`,
+          });
+          continue;
+        }
+        if (typesDiffer(concretized.type, expected)) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: field.value.span,
+            message: `Field '${field.name}' expects ${typeName(expected)}, got ${typeName(concretized.type)}`,
+          });
+        }
+      }
+      for (const [name] of declaredFields) {
+        if (!seenFields.has(name)) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: node.span,
+            message: `Missing field '${name}' in struct literal for '${node.typeName}'`,
+          });
+        }
+      }
+      return { kind: "struct", name: node.typeName };
+    },
+    visitArrayLiteral: (node) => {
+      const elements = node.elements;
+      if (elements.length === 0) {
         ctx.diagnostics.push({
           file: ctx.file,
-          span: field.value.span,
-          message: `Struct '${expr.typeName}' has no field '${field.name}'`,
+          span: node.span,
+          message: "Array literal must have at least one element",
         });
-        continue;
+        return { kind: "scalar", name: "f32" };
       }
-      const concretized = concretify(ctx, field.value, expected);
-      if (!concretized) {
-        ctx.diagnostics.push({
-          file: ctx.file,
-          span: field.value.span,
-          message: `Cannot convert field '${field.name}' to ${typeName(expected)}`,
-        });
-        continue;
+      const firstType = typeOf(ctx, elements[0]!);
+      for (let i = 1; i < elements.length; i++) {
+        const elemType = typeOf(ctx, elements[i]!);
+        if (typesDiffer(elemType, firstType)) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: elements[i]!.span,
+            message: `Array literal element ${i} expects ${typeName(firstType)}, got ${typeName(elemType)}`,
+          });
+        }
       }
-      if (typesDiffer(concretized.type, expected)) {
-        ctx.diagnostics.push({
-          file: ctx.file,
-          span: field.value.span,
-          message: `Field '${field.name}' expects ${typeName(expected)}, got ${typeName(concretized.type)}`,
-        });
-      }
-    }
-    for (const [name] of declaredFields) {
-      if (!seenFields.has(name)) {
-        ctx.diagnostics.push({
-          file: ctx.file,
-          span: expr.span,
-          message: `Missing field '${name}' in struct literal for '${expr.typeName}'`,
-        });
-      }
-    }
-    return { kind: "struct", name: expr.typeName };
-  }
-  if (expr.kind === "ArrayLiteral") {
-    const elements = expr.elements;
-    if (elements.length === 0) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: "Array literal must have at least one element",
-      });
-      return { kind: "scalar", name: "f32" };
-    }
-    // Infer element type from the first element
-    const firstType = typeOf(ctx, elements[0]!);
-    // All elements must match the first element's type
-    for (let i = 1; i < elements.length; i++) {
-      const elemType = typeOf(ctx, elements[i]!);
-      if (typesDiffer(elemType, firstType)) {
-        ctx.diagnostics.push({
-          file: ctx.file,
-          span: elements[i]!.span,
-          message: `Array literal element ${i} expects ${typeName(firstType)}, got ${typeName(elemType)}`,
-        });
-      }
-    }
-    return { kind: "array", element: firstType, size: elements.length };
-  }
-  if (expr.kind === "CompoundAssignExpr") {
-    const targetType = typeOf(ctx, expr.target);
-    const concretized = concretify(ctx, expr.value, targetType);
-    const valueType = concretized ? concretized.type : typeOf(ctx, expr.value);
-    const arithOps = new Set(["+=", "-=", "*=", "/=", "%="]);
-    const bitwiseOps = new Set(["&=", "|=", "^=", "<<=", ">>="]);
-    if (arithOps.has(expr.operator)) {
-      if (!concretized || typesDiffer(targetType, valueType)) {
-        ctx.diagnostics.push({
-          file: ctx.file,
-          span: expr.span,
-          message: `Compound assignment '${expr.operator}' requires same-type operands, got ${typeName(targetType)} and ${typeName(valueType)}`,
-        });
-      }
-      return targetType;
-    }
-    if (bitwiseOps.has(expr.operator)) {
-      if ((targetType.kind === "scalar" && (targetType.name === "i32" || targetType.name === "u32" || targetType.name === "i64" || targetType.name === "u64")) ||
-          (targetType.kind === "vector" && (targetType.element === "i32" || targetType.element === "u32" || targetType.element === "i64" || targetType.element === "u64"))) {
+      return { kind: "array", element: firstType, size: elements.length };
+    },
+    visitCompoundAssignExpr: (node) => {
+      const targetType = typeOf(ctx, node.target);
+      const concretized = concretify(ctx, node.value, targetType);
+      const valueType = concretized ? concretized.type : typeOf(ctx, node.value);
+      const arithOps = new Set(["+=", "-=", "*=", "/=", "%="]);
+      const bitwiseOps = new Set(["&=", "|=", "^=", "<<=", ">>="]);
+      if (arithOps.has(node.operator)) {
+        if (!concretized || typesDiffer(targetType, valueType)) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: node.span,
+            message: `Compound assignment '${node.operator}' requires same-type operands, got ${typeName(targetType)} and ${typeName(valueType)}`,
+          });
+        }
         return targetType;
       }
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Bitwise compound assignment '${expr.operator}' requires integer operands`,
-      });
+      if (bitwiseOps.has(node.operator)) {
+        if (
+          (isScalar(targetType) && INT_TYPES.has(targetType.name)) ||
+          (isVector(targetType) && INT_TYPES.has(targetType.element))
+        ) {
+          return targetType;
+        }
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Bitwise compound assignment '${node.operator}' requires integer operands`,
+        });
+        return targetType;
+      }
       return targetType;
-    }
-    return targetType;
-  }
-  if (expr.kind === "UpdateExpr") {
-    const operandType = typeOf(ctx, expr.operand);
-    if ((operandType.kind === "scalar" && (operandType.name === "i32" || operandType.name === "u32" || operandType.name === "i64" || operandType.name === "u64" || operandType.name === "f32" || operandType.name === "f64")) ||
-        operandType.kind === "vector") {
+    },
+    visitUpdateExpr: (node) => {
+      const operandType = typeOf(ctx, node.operand);
+      if (
+        (isScalar(operandType) && (INT_TYPES.has(operandType.name) || operandType.name === "f32" || operandType.name === "f64")) ||
+        isVector(operandType)
+      ) {
+        return operandType;
+      }
+      ctx.diagnostics.push({
+        file: ctx.file,
+        span: node.span,
+        message: `Increment/decrement requires numeric operand, got ${typeName(operandType)}`,
+      });
       return operandType;
-    }
-    ctx.diagnostics.push({
-      file: ctx.file,
-      span: expr.span,
-      message: `Increment/decrement requires numeric operand, got ${typeName(operandType)}`,
-    });
-    return operandType;
-  }
-  if (expr.kind === "ConditionalExpr") {
-    const testType = typeOf(ctx, expr.test);
-    if (testType.kind !== "scalar" || testType.name !== "bool") {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.test.span,
-        message: `Ternary condition must be bool, got ${typeName(testType)}`,
-      });
-    }
-    const consequentType = typeOf(ctx, expr.consequent);
-    const alternateType = typeOf(ctx, expr.alternate);
-    if (typesDiffer(consequentType, alternateType)) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Ternary branches must have same type, got ${typeName(consequentType)} and ${typeName(alternateType)}`,
-      });
-    }
-    return consequentType;
-  }
-  if (expr.kind === "NullCoalescingExpr") {
-    const leftType = typeOf(ctx, expr.left);
-    const rightType = typeOf(ctx, expr.right);
-    if (typesDiffer(leftType, rightType)) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: expr.span,
-        message: `Null coalescing branches must have same type, got ${typeName(leftType)} and ${typeName(rightType)}`,
-      });
-    }
-    return leftType;
-  }
-  if (expr.kind === "MatchExpr") {
-    let resultType: Type | null = null;
-    for (const arm of expr.arms) {
-      if (arm.guard) {
-        const guardType = typeOf(ctx, arm.guard);
-        if (guardType.kind !== "scalar" || guardType.name !== "bool") {
-          ctx.diagnostics.push({
-            file: ctx.file,
-            span: arm.guard.span,
-            message: `Match guard must be bool, got ${typeName(guardType)}`,
-          });
+    },
+    visitConditionalExpr: (node) => {
+      const testType = typeOf(ctx, node.test);
+      if (!isScalar(testType) || testType.name !== "bool") {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.test.span,
+          message: `Ternary condition must be bool, got ${typeName(testType)}`,
+        });
+      }
+      const consequentType = typeOf(ctx, node.consequent);
+      const alternateType = typeOf(ctx, node.alternate);
+      if (typesDiffer(consequentType, alternateType)) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Ternary branches must have same type, got ${typeName(consequentType)} and ${typeName(alternateType)}`,
+        });
+      }
+      return consequentType;
+    },
+    visitNullCoalescingExpr: (node) => {
+      const leftType = typeOf(ctx, node.left);
+      const rightType = typeOf(ctx, node.right);
+      if (typesDiffer(leftType, rightType)) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Null coalescing branches must have same type, got ${typeName(leftType)} and ${typeName(rightType)}`,
+        });
+      }
+      return leftType;
+    },
+    visitMatchExpr: (node) => {
+      let resultType: Type | null = null;
+      for (const arm of node.arms) {
+        if (arm.guard) {
+          const guardType = typeOf(ctx, arm.guard);
+          if (!isScalar(guardType) || guardType.name !== "bool") {
+            ctx.diagnostics.push({
+              file: ctx.file,
+              span: arm.guard.span,
+              message: `Match guard must be bool, got ${typeName(guardType)}`,
+            });
+          }
+        }
+        const lastStmt = arm.body.statements[arm.body.statements.length - 1];
+        if (lastStmt && isExpressionStmt(lastStmt)) {
+          const armType = typeOf(ctx, lastStmt.expression);
+          if (resultType && typesDiffer(resultType, armType)) {
+            ctx.diagnostics.push({
+              file: ctx.file,
+              span: arm.span,
+              message: `Match arms must have same result type, got ${typeName(resultType)} and ${typeName(armType)}`,
+            });
+          }
+          resultType = armType;
         }
       }
-      const lastStmt = arm.body.statements[arm.body.statements.length - 1];
-      if (lastStmt && lastStmt.kind === "ExpressionStmt") {
-        const armType = typeOf(ctx, lastStmt.expression);
-        if (resultType && typesDiffer(resultType, armType)) {
-          ctx.diagnostics.push({
-            file: ctx.file,
-            span: arm.span,
-            message: `Match arms must have same result type, got ${typeName(resultType)} and ${typeName(armType)}`,
-          });
-        }
-        resultType = armType;
+      return resultType ?? { kind: "scalar", name: "f32" };
+    },
+    visitBlockExpr: (node) => {
+      const lastStmt = node.block.statements[node.block.statements.length - 1];
+      if (lastStmt && isExpressionStmt(lastStmt)) {
+        return typeOf(ctx, lastStmt.expression);
       }
-    }
-    return resultType ?? { kind: "scalar", name: "f32" };
-  }
-  if (expr.kind === "BlockExpr") {
-    const lastStmt = expr.block.statements[expr.block.statements.length - 1];
-    if (lastStmt && lastStmt.kind === "ExpressionStmt") {
-      return typeOf(ctx, lastStmt.expression);
-    }
-    // Type check all statements for side effects
-    for (const stmt of expr.block.statements) {
-      typeCheckStatement(ctx, stmt);
-    }
-    return { kind: "scalar", name: "f32" };
-  }
-  return { kind: "scalar", name: "f32" };
+      for (const stmt of node.block.statements) {
+        typeCheckStatement(ctx, stmt);
+      }
+      return { kind: "scalar", name: "f32" };
+    },
+  });
 }
 
 /**
@@ -612,24 +642,21 @@ function typesDiffer(a: Type, b: Type): boolean {
   if (a.kind !== b.kind) return true;
   switch (a.kind) {
     case "scalar":
-      return a.name !== (b as Extract<Type, { kind: "scalar" }>).name;
+      return (a as Extract<Type, { kind: "scalar" }>).name !== (b as Extract<Type, { kind: "scalar" }>).name;
     case "vector":
-      return a.size !== (b as Extract<Type, { kind: "vector" }>).size ||
-        a.element !== (b as Extract<Type, { kind: "vector" }>).element;
-    case "matrix": {
-      const am = a as Extract<Type, { kind: "matrix" }>;
-      const bm = b as Extract<Type, { kind: "matrix" }>;
-      return am.rows !== bm.rows || am.columns !== bm.columns || am.element !== bm.element;
-    }
+      return (a as Extract<Type, { kind: "vector" }>).size !== (b as Extract<Type, { kind: "vector" }>).size ||
+        (a as Extract<Type, { kind: "vector" }>).element !== (b as Extract<Type, { kind: "vector" }>).element;
+    case "matrix":
+      return (a as Extract<Type, { kind: "matrix" }>).rows !== (b as Extract<Type, { kind: "matrix" }>).rows ||
+        (a as Extract<Type, { kind: "matrix" }>).columns !== (b as Extract<Type, { kind: "matrix" }>).columns ||
+        (a as Extract<Type, { kind: "matrix" }>).element !== (b as Extract<Type, { kind: "matrix" }>).element;
     case "struct":
-      return a.name !== (b as Extract<Type, { kind: "struct" }>).name;
+      return (a as Extract<Type, { kind: "struct" }>).name !== (b as Extract<Type, { kind: "struct" }>).name;
     case "sampler":
-      return a.name !== (b as Extract<Type, { kind: "sampler" }>).name;
-    case "array": {
-      const am = a as Extract<Type, { kind: "array" }>;
-      const bm = b as Extract<Type, { kind: "array" }>;
-      return am.size !== bm.size || typesDiffer(am.element, bm.element);
-    }
+      return (a as Extract<Type, { kind: "sampler" }>).name !== (b as Extract<Type, { kind: "sampler" }>).name;
+    case "array":
+      return (a as Extract<Type, { kind: "array" }>).size !== (b as Extract<Type, { kind: "array" }>).size ||
+        typesDiffer((a as Extract<Type, { kind: "array" }>).element, (b as Extract<Type, { kind: "array" }>).element);
     case "quaternion":
       return false;
     default:
@@ -658,50 +685,46 @@ function checkBinaryOp(
   let rt = right;
 
   // Concretize abstract literals against each other
-  if (lt.kind === "abstractInt" || lt.kind === "abstractFloat") {
-    if (rt.kind !== "abstractInt" && rt.kind !== "abstractFloat") {
+  if (isAbstractInt(lt) || isAbstractFloat(lt)) {
+    if (!isAbstractInt(rt) && !isAbstractFloat(rt)) {
       lt = concretize(lt, rt);
     }
   }
-  if (rt.kind === "abstractInt" || rt.kind === "abstractFloat") {
-    if (lt.kind !== "abstractInt" && lt.kind !== "abstractFloat") {
+  if (isAbstractInt(rt) || isAbstractFloat(rt)) {
+    if (!isAbstractInt(lt) && !isAbstractFloat(lt)) {
       rt = concretize(rt, lt);
     }
   }
 
   if (ARITH_OPS.has(operator)) {
-    // Concretize abstract literals against each other or concrete types
-    if (lt.kind === "abstractInt" || lt.kind === "abstractFloat") {
-      if (rt.kind !== "abstractInt" && rt.kind !== "abstractFloat") {
+    if (isAbstractInt(lt) || isAbstractFloat(lt)) {
+      if (!isAbstractInt(rt) && !isAbstractFloat(rt)) {
         lt = concretize(lt, rt);
       }
     }
-    if (rt.kind === "abstractInt" || rt.kind === "abstractFloat") {
-      if (lt.kind !== "abstractInt" && lt.kind !== "abstractFloat") {
+    if (isAbstractInt(rt) || isAbstractFloat(rt)) {
+      if (!isAbstractInt(lt) && !isAbstractFloat(lt)) {
         rt = concretize(rt, lt);
       }
     }
 
-    // Both abstract int
-    if (lt.kind === "abstractInt" && rt.kind === "abstractInt") {
+    if (isAbstractInt(lt) && isAbstractInt(rt)) {
       return { kind: "abstractInt" };
     }
-    // Both abstract float
-    if (lt.kind === "abstractFloat" && rt.kind === "abstractFloat") {
+    if (isAbstractFloat(lt) && isAbstractFloat(rt)) {
       return { kind: "abstractFloat" };
     }
 
-    // Vector + scalar broadcast
-    if (lt.kind === "vector" || rt.kind === "vector") {
-      const vec = (lt.kind === "vector" ? lt : rt) as Extract<Type, { kind: "vector" }>;
-      const scalar = (lt.kind === "vector" ? rt : lt) as Extract<Type, { kind: "scalar" }>;
-      if (scalar.name === vec.element) {
+    if (isVector(lt) || isVector(rt)) {
+      const vec = isVector(lt) ? lt : rt;
+      const scalar = isVector(lt) ? rt : lt;
+      const v = vec as Extract<Type, { kind: "vector" }>;
+      if (isScalar(scalar) && scalar.name === v.element) {
         return vec;
       }
     }
 
-    // Same concrete scalar type
-    if (lt.kind === "scalar" && rt.kind === "scalar" && lt.name === rt.name) {
+    if (isScalar(lt) && isScalar(rt) && lt.name === rt.name) {
       return lt;
     }
 
@@ -736,12 +759,11 @@ function checkBinaryOp(
   }
 
   if (BITWISE_OPS.has(operator)) {
-    // Both abstract int
-    if (lt.kind === "abstractInt" && rt.kind === "abstractInt") {
+    if (isAbstractInt(lt) && isAbstractInt(rt)) {
       return { kind: "abstractInt" };
     }
-    const isInt = (t: Type) => t.kind === "scalar" && INT_TYPES.has(t.name);
-    const isIntVec = (t: Type) => t.kind === "vector" && INT_TYPES.has(t.element);
+    const isInt = (t: Type) => isScalar(t) && INT_TYPES.has(t.name);
+    const isIntVec = (t: Type) => isVector(t) && INT_TYPES.has(t.element);
     if ((isInt(lt) && isInt(rt)) || (isIntVec(lt) && isIntVec(rt))) {
       return lt;
     }
@@ -754,7 +776,7 @@ function checkBinaryOp(
   }
 
   if (LOGIC_OPS.has(operator)) {
-    if (lt.kind !== "scalar" || lt.name !== "bool" || rt.kind !== "scalar" || rt.name !== "bool") {
+    if (!isScalar(lt) || lt.name !== "bool" || !isScalar(rt) || rt.name !== "bool") {
       ctx.diagnostics.push({
         file: ctx.file,
         span,
@@ -788,11 +810,13 @@ function checkUnaryOp(
   span: Span
 ): Type {
   if (operator === "-") {
-    if (operand.kind === "abstractInt" || operand.kind === "abstractFloat") {
+    if (isAbstractInt(operand) || isAbstractFloat(operand)) {
       return operand;
     }
-    if ((operand.kind === "scalar" && (operand.name === "i32" || operand.name === "f32" || operand.name === "i64" || operand.name === "f64" || operand.name === "f16" || operand.name === "bf16" || operand.name === "i8" || operand.name === "u8" || operand.name === "i16" || operand.name === "u16")) ||
-        operand.kind === "vector") {
+    if (
+      (isScalar(operand) && (INT_TYPES.has(operand.name) || operand.name === "f32" || operand.name === "f64")) ||
+      isVector(operand)
+    ) {
       return operand;
     }
     ctx.diagnostics.push({
@@ -803,7 +827,7 @@ function checkUnaryOp(
     return { kind: "scalar", name: "f32" };
   }
   if (operator === "!" || operator === "not") {
-    if (operand.kind === "scalar" && operand.name === "bool") {
+    if (isScalar(operand) && operand.name === "bool") {
       return { kind: "scalar", name: "bool" };
     }
     ctx.diagnostics.push({
@@ -814,13 +838,13 @@ function checkUnaryOp(
     return { kind: "scalar", name: "bool" };
   }
   if (operator === "~") {
-    if (operand.kind === "abstractInt") {
+    if (isAbstractInt(operand)) {
       return { kind: "abstractInt" };
     }
-    if (operand.kind === "scalar" && INT_TYPES.has(operand.name)) {
+    if (isScalar(operand) && INT_TYPES.has(operand.name)) {
       return operand;
     }
-    if (operand.kind === "vector" && INT_TYPES.has(operand.element!)) {
+    if (isVector(operand) && INT_TYPES.has(operand.element)) {
       return operand;
     }
     ctx.diagnostics.push({
@@ -996,7 +1020,7 @@ const BUILTIN_SIGNATURES: Record<string, { params: Type[]; result: Type }[]> = {
     { params: [{ kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }], result: { kind: "matrix", element: "f64", rows: 3, columns: 3 } },
   ],
   dmat4: [
-    { params: [{ kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }], result: { kind: "matrix", element: "f64", rows: 4, columns: 4 } },
+    { params: [{ kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }, { kind: "scalar", name: "f64" }], result: { kind: "matrix", element: "f64", rows: 4, columns: 4 } },
   ],
   imat2: [
     { params: [{ kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }], result: { kind: "matrix", element: "i32", rows: 2, columns: 2 } },
@@ -1005,7 +1029,7 @@ const BUILTIN_SIGNATURES: Record<string, { params: Type[]; result: Type }[]> = {
     { params: [{ kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }], result: { kind: "matrix", element: "i32", rows: 3, columns: 3 } },
   ],
   imat4: [
-    { params: [{ kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }], result: { kind: "matrix", element: "i32", rows: 4, columns: 4 } },
+    { params: [{ kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }], result: { kind: "matrix", element: "i32", rows: 4, columns: 4 } },
   ],
   umat2: [
     { params: [{ kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }], result: { kind: "matrix", element: "u32", rows: 2, columns: 2 } },
@@ -1014,7 +1038,7 @@ const BUILTIN_SIGNATURES: Record<string, { params: Type[]; result: Type }[]> = {
     { params: [{ kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }], result: { kind: "matrix", element: "u32", rows: 3, columns: 3 } },
   ],
   umat4: [
-    { params: [{ kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }], result: { kind: "matrix", element: "u32", rows: 4, columns: 4 } },
+    { params: [{ kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }, { kind: "scalar", name: "u32" }], result: { kind: "matrix", element: "u32", rows: 4, columns: 4 } },
   ],
   quat: [
     { params: [{ kind: "scalar", name: "f32" }, { kind: "scalar", name: "f32" }, { kind: "scalar", name: "f32" }, { kind: "scalar", name: "f32" }], result: { kind: "quaternion" } },
@@ -1166,7 +1190,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
 
   // First pass: collect struct, function, and binding declarations
   for (const stmt of program.statements) {
-    if (stmt.kind === "StructDecl") {
+    if (isStructDecl(stmt)) {
       if (structs.has(stmt.name)) {
         diagnostics.push({
           file,
@@ -1185,7 +1209,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
         }
       }
     }
-    if (stmt.kind === "FnDecl") {
+    if (isFnDecl(stmt)) {
       if (functions.has(stmt.name)) {
         diagnostics.push({
           file,
@@ -1211,7 +1235,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
         });
       }
     }
-    if (stmt.kind === "BindingDecl") {
+    if (isBindingDecl(stmt)) {
       if (bindings.has(stmt.binding)) {
         diagnostics.push({
           file,
@@ -1221,12 +1245,8 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
       }
       bindings.set(stmt.binding, stmt);
     }
-    if (stmt.kind === "EnumDecl") {
-      // Enum declarations collected in global scope above
-    }
-    if (stmt.kind === "TypeAlias") {
-      // Type aliases collected in global scope above
-    }
+    // EnumDecl, TypeAlias, ImplBlock, TraitDecl, NewtypeDecl, OpaqueDecl
+    // are collected in the global scope below
   }
 
   const globalScope = makeScope(null);
@@ -1271,7 +1291,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
 
   // Type check each function body
   for (const stmt of program.statements) {
-    if (stmt.kind === "FnDecl") {
+    if (isFnDecl(stmt)) {
       typeCheckFunction(ctx, stmt);
     }
   }
@@ -1341,129 +1361,123 @@ function typeCheckBlock(ctx: TypeCheckContext, block: Block): void {
  * @param stmt - The statement to type-check.
  */
 function typeCheckStatement(ctx: TypeCheckContext, stmt: Statement): void {
-  switch (stmt.kind) {
-    case "VarDecl": {
-      if (containsSampler(stmt.type)) {
+  visitStatement(stmt, {
+    visitVarDecl: (node) => {
+      if (containsSampler(node.type)) {
         ctx.diagnostics.push({
           file: ctx.file,
-          span: stmt.span,
-          message: `Sampler type '${typeName(stmt.type)}' can only appear in a binding declaration`,
+          span: node.span,
+          message: `Sampler type '${typeName(node.type)}' can only appear in a binding declaration`,
         });
       }
       let initType: Type | null = null;
-      if (stmt.initializer) {
-        if (stmt.initializer.kind === "StructLiteral" && !stmt.initializer.typeName &&
-            stmt.type.kind === "struct") {
-          stmt.initializer.typeName = stmt.type.name;
+      if (node.initializer) {
+        if (node.initializer.kind === "StructLiteral" && !node.initializer.typeName &&
+            isStructType(node.type)) {
+          node.initializer.typeName = node.type.name;
         }
-        const concretized = concretify(ctx, stmt.initializer, stmt.type);
+        const concretized = concretify(ctx, node.initializer, node.type);
         if (!concretized) {
           ctx.diagnostics.push({
             file: ctx.file,
-            span: stmt.span,
-            message: `Variable '${stmt.name}' cannot be initialized with a value of type ${typeName(stmt.type)}`,
+            span: node.span,
+            message: `Variable '${node.name}' cannot be initialized with a value of type ${typeName(node.type)}`,
           });
         } else {
           initType = concretized.type;
-          if (typesDiffer(initType, stmt.type)) {
+          if (typesDiffer(initType, node.type)) {
             ctx.diagnostics.push({
               file: ctx.file,
-              span: stmt.span,
-              message: `Variable '${stmt.name}' expects ${typeName(stmt.type)}, got ${typeName(initType)}`,
+              span: node.span,
+              message: `Variable '${node.name}' expects ${typeName(node.type)}, got ${typeName(initType)}`,
             });
           }
         }
       }
-      define(ctx, { name: stmt.name, type: stmt.type, kind: "variable", span: stmt.span });
-      break;
-    }
-    case "ReturnStmt": {
-      if (stmt.value) {
-        if (stmt.value.kind === "StructLiteral" && !stmt.value.typeName &&
-            ctx.currentFnReturnType?.kind === "struct") {
-          stmt.value.typeName = ctx.currentFnReturnType.name;
+      define(ctx, { name: node.name, type: node.type, kind: "variable", span: node.span });
+    },
+    visitReturnStmt: (node) => {
+      if (node.value) {
+        if (node.value.kind === "StructLiteral" && !node.value.typeName &&
+            isStructType(ctx.currentFnReturnType!)) {
+          node.value.typeName = ctx.currentFnReturnType!.name;
         }
-        const concretized = concretify(ctx, stmt.value, ctx.currentFnReturnType!);
+        const concretized = concretify(ctx, node.value, ctx.currentFnReturnType!);
         if (!concretized) {
           ctx.diagnostics.push({
             file: ctx.file,
-            span: stmt.span,
+            span: node.span,
             message: `Return value cannot be converted to ${typeName(ctx.currentFnReturnType!)}`,
           });
         } else if (ctx.currentFnReturnType && typesDiffer(concretized.type, ctx.currentFnReturnType)) {
           ctx.diagnostics.push({
             file: ctx.file,
-            span: stmt.span,
+            span: node.span,
             message: `Return type ${typeName(concretized.type)} does not match function return type ${typeName(ctx.currentFnReturnType)}`,
           });
         }
       } else if (ctx.currentFnReturnType) {
         ctx.diagnostics.push({
           file: ctx.file,
-          span: stmt.span,
+          span: node.span,
           message: `Missing return value; function expects ${typeName(ctx.currentFnReturnType)}`,
         });
       }
-      break;
-    }
-    case "ExpressionStmt": {
-      typeOf(ctx, stmt.expression);
-      break;
-    }
-    case "Block": {
-      typeCheckBlock(ctx, stmt);
-      break;
-    }
-    case "IfStmt": {
-      const condType = typeOf(ctx, stmt.condition);
-      if (condType.kind !== "scalar" || condType.name !== "bool") {
+    },
+    visitExpressionStmt: (node) => {
+      typeOf(ctx, node.expression);
+    },
+    visitBlock: (node) => {
+      typeCheckBlock(ctx, node);
+    },
+    visitIfStmt: (node) => {
+      const condType = typeOf(ctx, node.condition);
+      if (!isScalar(condType) || condType.name !== "bool") {
         ctx.diagnostics.push({
           file: ctx.file,
           span: stmt.span,
           message: `If condition must be bool, got ${typeName(condType)}`,
         });
       }
-      typeCheckBlock(ctx, stmt.thenBranch);
-      if (stmt.elseBranch) {
-        typeCheckBlock(ctx, stmt.elseBranch);
+      typeCheckBlock(ctx, node.thenBranch);
+      if (node.elseBranch) {
+        typeCheckBlock(ctx, node.elseBranch);
       }
-      break;
-    }
-    case "WhileStmt": {
-      const condType = typeOf(ctx, stmt.condition);
-      if (condType.kind !== "scalar" || condType.name !== "bool") {
+    },
+    visitWhileStmt: (node) => {
+      const condType = typeOf(ctx, node.condition);
+      if (!isScalar(condType) || condType.name !== "bool") {
         ctx.diagnostics.push({
           file: ctx.file,
           span: stmt.span,
           message: `While condition must be bool, got ${typeName(condType)}`,
         });
       }
-      typeCheckBlock(ctx, stmt.body);
-      break;
-    }
-    case "ForStmt": {
-      if (stmt.range) {
-        const startType = typeOf(ctx, stmt.range.start);
-        typeOf(ctx, stmt.range.end);
-        if (stmt.body.statements.length > 0) {
+      typeCheckBlock(ctx, node.body);
+    },
+    visitForStmt: (node) => {
+      if (node.range) {
+        const startType = typeOf(ctx, node.range.start);
+        typeOf(ctx, node.range.end);
+        if (node.body.statements.length > 0) {
           const blockScope = makeScope(ctx.scope);
-          blockScope.symbols.set("", { name: "", type: startType, kind: "variable", span: stmt.span });
+          blockScope.symbols.set("", { name: "", type: startType, kind: "variable", span: node.span });
           const prevScope = ctx.scope;
           ctx.scope = blockScope;
-          typeCheckBlock(ctx, stmt.body);
+          typeCheckBlock(ctx, node.body);
           ctx.scope = prevScope;
         }
       } else {
-        if (stmt.init) {
-          if (stmt.init.kind === "VarDecl") {
-            typeCheckStatement(ctx, stmt.init);
-          } else if (stmt.init.kind === "ExpressionStmt") {
-            typeOf(ctx, stmt.init.expression);
+        if (node.init) {
+          if (isVarDecl(node.init)) {
+            typeCheckStatement(ctx, node.init);
+          } else if (isExpressionStmt(node.init)) {
+            typeOf(ctx, node.init.expression);
           }
         }
-        if (stmt.condition) {
-          const condType = typeOf(ctx, stmt.condition);
-          if (condType.kind !== "scalar" || condType.name !== "bool") {
+        if (node.condition) {
+          const condType = typeOf(ctx, node.condition);
+          if (!isScalar(condType) || condType.name !== "bool") {
             ctx.diagnostics.push({
               file: ctx.file,
               span: stmt.span,
@@ -1471,52 +1485,44 @@ function typeCheckStatement(ctx: TypeCheckContext, stmt: Statement): void {
             });
           }
         }
-        if (stmt.increment) {
-          typeOf(ctx, stmt.increment);
+        if (node.increment) {
+          typeOf(ctx, node.increment);
         }
-        typeCheckBlock(ctx, stmt.body);
+        typeCheckBlock(ctx, node.body);
       }
-      break;
-    }
-    case "DoWhileStmt": {
-      typeCheckBlock(ctx, stmt.body);
-      const condType = typeOf(ctx, stmt.condition);
-      if (condType.kind !== "scalar" || condType.name !== "bool") {
+    },
+    visitDoWhileStmt: (node) => {
+      typeCheckBlock(ctx, node.body);
+      const condType = typeOf(ctx, node.condition);
+      if (!isScalar(condType) || condType.name !== "bool") {
         ctx.diagnostics.push({
           file: ctx.file,
           span: stmt.span,
           message: `Do-while condition must be bool, got ${typeName(condType)}`,
         });
       }
-      break;
-    }
-    case "LoopStmt": {
-      typeCheckBlock(ctx, stmt.body);
-      break;
-    }
-    case "BreakStmt":
-    case "ContinueStmt":
-      break;
-    case "PanicStmt": {
-      if (stmt.message) {
-        typeOf(ctx, stmt.message);
+    },
+    visitLoopStmt: (node) => {
+      typeCheckBlock(ctx, node.body);
+    },
+    visitBreakStmt: () => {},
+    visitContinueStmt: () => {},
+    visitPanicStmt: (node) => {
+      if (node.message) {
+        typeOf(ctx, node.message);
       }
-      break;
-    }
-    case "UnreachableStmt":
-      break;
-    case "DiscardStmt":
-      break;
-    case "StructDecl":
-    case "FnDecl":
-    case "BindingDecl":
-    case "EnumDecl":
-    case "ImplBlock":
-    case "TraitDecl":
-    case "TypeAlias":
-    case "NewtypeDecl":
-    case "OpaqueDecl":
-      // Already collected at program level or handled separately
-      break;
-  }
+    },
+    visitUnreachableStmt: () => {},
+    visitDiscardStmt: () => {},
+    visitStructDecl: () => {},
+    visitFnDecl: () => {},
+    visitBindingDecl: () => {},
+    visitEnumDecl: () => {},
+    visitImplBlock: () => {},
+    visitTraitDecl: () => {},
+    visitTypeAlias: () => {},
+    visitNewtypeDecl: () => {},
+    visitOpaqueDecl: () => {},
+    visitImportDecl: () => {},
+  });
 }

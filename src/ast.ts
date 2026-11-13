@@ -15,7 +15,6 @@ import type {
   ForStmt,
   IfStmt,
   ImportDecl,
-  Literal,
   LoopStmt,
   MatchArm,
   MatchExpr,
@@ -34,7 +33,25 @@ import type {
   UnreachableStmt,
   VarDecl,
   WhileStmt,
+  WildcardPattern,
+  BindingPattern,
+  LiteralPattern,
+  Identifier,
+  LiteralBase,
+  BinaryExpr,
+  UnaryExpr,
+  CallExpr,
+  SwizzleExpr,
+  IndexExpr,
+  CompoundAssignExpr,
+  UpdateExpr,
+  ConditionalExpr,
+  NullCoalescingExpr,
+  NewtypeDecl,
+  OpaqueDecl,
+  ImplBlock,
 } from "./types";
+import { literal } from "./types";
 
 const DEFAULT_SPAN = { line: 1, column: 1 } as const;
 
@@ -48,6 +65,10 @@ const DEFAULT_SPAN = { line: 1, column: 1 } as const;
 export function span(line = 1, column = 1): { line: number; column: number } {
   return { line, column };
 }
+
+/* ------------------------------------------------------------------ */
+/* Type builders                                                        */
+/* ------------------------------------------------------------------ */
 
 /**
  * Builds a scalar type node.
@@ -414,6 +435,10 @@ export function unionType(members: Type[]): Type {
   return { kind: "union", members };
 }
 
+/* ------------------------------------------------------------------ */
+/* Field / Param builders                                               */
+/* ------------------------------------------------------------------ */
+
 /**
  * Builds a struct field.
  *
@@ -435,6 +460,10 @@ export function field(name: string, type: Type): Field {
 export function param(name: string, type: Type): Param {
   return { name, type };
 }
+
+/* ------------------------------------------------------------------ */
+/* Statement builders                                                   */
+/* ------------------------------------------------------------------ */
 
 /**
  * Builds a struct declaration.
@@ -704,13 +733,17 @@ export function unreachableStmt(): UnreachableStmt {
   return { kind: "UnreachableStmt", span: DEFAULT_SPAN };
 }
 
+/* ------------------------------------------------------------------ */
+/* Expression builders                                                  */
+/* ------------------------------------------------------------------ */
+
 /**
  * Builds an identifier expression.
  *
  * @param name - The identifier name.
  * @returns The Identifier expression node.
  */
-export function ident(name: string): { kind: "Identifier"; name: string; span: { line: number; column: number } } {
+export function ident(name: string): Identifier {
   return { kind: "Identifier", name, span: DEFAULT_SPAN };
 }
 
@@ -718,30 +751,30 @@ export function ident(name: string): { kind: "Identifier"; name: string; span: {
  * Builds an integer literal expression.
  *
  * @param value - The integer value.
- * @returns The Literal expression node.
+ * @returns The Literal expression node with literalKind "int".
  */
-export function int(value: number): Literal {
-  return { kind: "Literal", value, literalKind: "int", span: DEFAULT_SPAN };
+export function int(value: number): LiteralBase<"int"> {
+  return literal("int", value, DEFAULT_SPAN);
 }
 
 /**
  * Builds a float literal expression.
  *
  * @param value - The float value.
- * @returns The Literal expression node.
+ * @returns The Literal expression node with literalKind "float".
  */
-export function float(value: number): Literal {
-  return { kind: "Literal", value, literalKind: "float", span: DEFAULT_SPAN };
+export function float(value: number): LiteralBase<"float"> {
+  return literal("float", value, DEFAULT_SPAN);
 }
 
 /**
  * Builds a boolean literal expression.
  *
  * @param value - The boolean value.
- * @returns The Literal expression node.
+ * @returns The Literal expression node with literalKind "bool".
  */
-export function bool(value: boolean): Literal {
-  return { kind: "Literal", value, literalKind: "bool", span: DEFAULT_SPAN };
+export function boolLiteral(value: boolean): LiteralBase<"bool"> {
+  return literal("bool", value, DEFAULT_SPAN);
 }
 
 /**
@@ -752,7 +785,7 @@ export function bool(value: boolean): Literal {
  * @param right - The right operand.
  * @returns The BinaryExpr expression node.
  */
-export function binary(left: Expression, operator: string, right: Expression): { kind: "BinaryExpr"; left: Expression; operator: string; right: Expression; span: { line: number; column: number } } {
+export function binary(left: Expression, operator: string, right: Expression): BinaryExpr {
   return { kind: "BinaryExpr", left, operator, right, span: DEFAULT_SPAN };
 }
 
@@ -763,7 +796,7 @@ export function binary(left: Expression, operator: string, right: Expression): {
  * @param operand - The operand expression.
  * @returns The UnaryExpr expression node.
  */
-export function unary(operator: string, operand: Expression): { kind: "UnaryExpr"; operator: string; operand: Expression; span: { line: number; column: number } } {
+export function unary(operator: string, operand: Expression): UnaryExpr {
   return { kind: "UnaryExpr", operator, operand, span: DEFAULT_SPAN };
 }
 
@@ -774,7 +807,7 @@ export function unary(operator: string, operand: Expression): { kind: "UnaryExpr
  * @param args - The call arguments (default empty).
  * @returns The CallExpr expression node.
  */
-export function call(callee: Expression, args: Expression[] = []): { kind: "CallExpr"; callee: Expression; args: Expression[]; span: { line: number; column: number } } {
+export function call(callee: Expression, args: Expression[] = []): CallExpr {
   return { kind: "CallExpr", callee, args, span: DEFAULT_SPAN };
 }
 
@@ -796,7 +829,7 @@ export function member(object: Expression, property: string): MemberExpr {
  * @param components - The swizzle components (e.g. ["r", "g", "b"]).
  * @returns The SwizzleExpr expression node.
  */
-export function swizzle(object: Expression, components: string[]): { kind: "SwizzleExpr"; object: Expression; components: string[]; span: { line: number; column: number } } {
+export function swizzle(object: Expression, components: string[]): SwizzleExpr {
   return { kind: "SwizzleExpr", object, components, span: DEFAULT_SPAN };
 }
 
@@ -807,7 +840,7 @@ export function swizzle(object: Expression, components: string[]): { kind: "Swiz
  * @param indexExpr - The index expression.
  * @returns The IndexExpr expression node.
  */
-export function index(object: Expression, indexExpr: Expression): { kind: "IndexExpr"; object: Expression; index: Expression; span: { line: number; column: number } } {
+export function index(object: Expression, indexExpr: Expression): IndexExpr {
   return { kind: "IndexExpr", object, index: indexExpr, span: DEFAULT_SPAN };
 }
 
@@ -847,7 +880,7 @@ export function compoundAssign(
   target: Expression,
   operator: "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=",
   value: Expression,
-): { kind: "CompoundAssignExpr"; operator: "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="; target: Expression; value: Expression; span: { line: number; column: number } } {
+): CompoundAssignExpr {
   return { kind: "CompoundAssignExpr", operator, target, value, span: DEFAULT_SPAN };
 }
 
@@ -863,7 +896,7 @@ export function update(
   operator: "++" | "--",
   operand: Expression,
   prefix = false,
-): { kind: "UpdateExpr"; operator: "++" | "--"; operand: Expression; prefix: boolean; span: { line: number; column: number } } {
+): UpdateExpr {
   return { kind: "UpdateExpr", operator, operand, prefix, span: DEFAULT_SPAN };
 }
 
@@ -879,7 +912,7 @@ export function conditional(
   test: Expression,
   consequent: Expression,
   alternate: Expression,
-): { kind: "ConditionalExpr"; test: Expression; consequent: Expression; alternate: Expression; span: { line: number; column: number } } {
+): ConditionalExpr {
   return { kind: "ConditionalExpr", test, consequent, alternate, span: DEFAULT_SPAN };
 }
 
@@ -890,7 +923,7 @@ export function conditional(
  * @param right - The right expression.
  * @returns The NullCoalescingExpr expression node.
  */
-export function nullCoalescing(left: Expression, right: Expression): { kind: "NullCoalescingExpr"; left: Expression; right: Expression; span: { line: number; column: number } } {
+export function nullCoalescing(left: Expression, right: Expression): NullCoalescingExpr {
   return { kind: "NullCoalescingExpr", left, right, span: DEFAULT_SPAN };
 }
 
@@ -915,34 +948,38 @@ export function blockExpr(block: Block): BlockExpr {
   return { kind: "BlockExpr", block, span: DEFAULT_SPAN };
 }
 
+/* ------------------------------------------------------------------ */
+/* Pattern builders                                                     */
+/* ------------------------------------------------------------------ */
+
 /**
  * Builds a literal match pattern.
  *
  * @param value - The literal value.
- * @returns The Pattern node.
+ * @returns The LiteralPattern node.
  */
 export function literalPattern(
   value: number | string | boolean,
-): Pattern {
-  return { kind: "literal", binding: null, value, subPatterns: [], span: DEFAULT_SPAN };
+): LiteralPattern {
+  return { kind: "literal", value, span: DEFAULT_SPAN };
 }
 
 /**
  * Builds a binding match pattern.
  *
  * @param name - The binding name.
- * @returns The Pattern node.
+ * @returns The BindingPattern node.
  */
-export function bindingPattern(name: string): Pattern {
-  return { kind: "binding", binding: name, value: null, subPatterns: [], span: DEFAULT_SPAN };
+export function bindingPattern(name: string): BindingPattern {
+  return { kind: "binding", binding: name, span: DEFAULT_SPAN };
 }
 
 /**
  * Builds a wildcard match pattern.
- * @returns The Pattern node.
+ * @returns The WildcardPattern node.
  */
-export function wildcardPattern(): Pattern {
-  return { kind: "wildcard", binding: null, value: null, subPatterns: [], span: DEFAULT_SPAN };
+export function wildcardPattern(): WildcardPattern {
+  return { kind: "wildcard", span: DEFAULT_SPAN };
 }
 
 /**
@@ -966,6 +1003,10 @@ export function arm(
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Declaration builders (trait / impl / alias / newtype / opaque)       */
+/* ------------------------------------------------------------------ */
+
 /**
  * Builds a type alias declaration.
  *
@@ -984,7 +1025,7 @@ export function typeAlias(name: string, type: Type): TypeAlias {
  * @param innerType - The inner Type.
  * @returns The NewtypeDecl node.
  */
-export function newtypeDecl(name: string, innerType: Type): { kind: "NewtypeDecl"; name: string; innerType: Type; span: { line: number; column: number } } {
+export function newtypeDecl(name: string, innerType: Type): NewtypeDecl {
   return { kind: "NewtypeDecl", name, innerType, span: DEFAULT_SPAN };
 }
 
@@ -994,7 +1035,7 @@ export function newtypeDecl(name: string, innerType: Type): { kind: "NewtypeDecl
  * @param name - The opaque type name.
  * @returns The OpaqueDecl node.
  */
-export function opaqueDecl(name: string): { kind: "OpaqueDecl"; name: string; span: { line: number; column: number } } {
+export function opaqueDecl(name: string): OpaqueDecl {
   return { kind: "OpaqueDecl", name, span: DEFAULT_SPAN };
 }
 
@@ -1026,9 +1067,13 @@ export function implBlock(
   trait: string | null,
   type: Type,
   methods: FnDecl[],
-): { kind: "ImplBlock"; trait: string | null; type: Type; methods: FnDecl[]; span: { line: number; column: number } } {
+): ImplBlock {
   return { kind: "ImplBlock", trait, type, methods, span: DEFAULT_SPAN };
 }
+
+/* ------------------------------------------------------------------ */
+/* Program                                                              */
+/* ------------------------------------------------------------------ */
 
 /**
  * Builds a Program node.
@@ -1039,6 +1084,10 @@ export function implBlock(
 export function program(statements: Statement[]): Program {
   return { kind: "Program", statements, span: DEFAULT_SPAN };
 }
+
+/* ------------------------------------------------------------------ */
+/* Convenience: main entry point                                        */
+/* ------------------------------------------------------------------ */
 
 /**
  * Builds a `fn main(): vec4` entry point.

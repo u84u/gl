@@ -5,6 +5,48 @@ import {
   Statement,
   StructDecl,
   Type,
+  // Type guards
+  isScalar,
+  isVector,
+  isMatrix,
+  isStructType,
+  isSampler,
+  isArray,
+  isLiteral,
+  isLiteralOfKind,
+  isIdentifier,
+  isBinaryExpr,
+  isUnaryExpr,
+  isCallExpr,
+  isMemberExpr,
+  isSwizzleExpr,
+  isIndexExpr,
+  isStructLiteral,
+  isArrayLiteral,
+  isCompoundAssignExpr,
+  isUpdateExpr,
+  isConditionalExpr,
+  isNullCoalescingExpr,
+  isMatchExpr,
+  isBlockExpr,
+  // Statement guards
+  isStructDecl,
+  isBindingDecl,
+  isFnDecl,
+  isVarDecl,
+  isReturnStmt,
+  isExpressionStmt,
+  isBlock,
+  isIfStmt,
+  isWhileStmt,
+  isForStmt,
+  isDoWhileStmt,
+  isLoopStmt,
+  isBreakStmt,
+  isContinueStmt,
+  isPanicStmt,
+  isUnreachableStmt,
+  isDiscardStmt,
 } from "../types";
 
 const SCALAR_MAP: Record<string, string> = {
@@ -116,39 +158,33 @@ function samplerTextureType(name: string): string {
  * @returns The WGSL type string.
  */
 function wgslType(t: Type): string {
-  switch (t.kind) {
-    case "scalar": {
-      const mapped = SCALAR_MAP[t.name];
-      if (!mapped) throw new Error(`Unknown scalar type: ${t.name}`);
-      return mapped;
-    }
-    case "vector": {
-      const prefix = VEC_TYPE_MAP[t.element] || "vec";
-      return `${prefix}<${t.element}>`;
-    }
-    case "struct":
-      return t.name;
-    case "sampler":
-      return "sampler";
-    case "quaternion":
-      return "vec4<f32>";
-    case "matrix": {
-      const m = t;
-      const prefix = MAT_PREFIX_MAP[m.element] || "";
-      if (m.rows === m.columns) {
-        return `${prefix}mat${m.rows}x${m.rows}<${m.element}>`;
-      }
-      return `${prefix}mat${m.columns}x${m.rows}<${m.element}>`;
-    }
-    case "opaque":
-      return t.name;
-    case "anonymousStruct":
-      return `AnonStruct_${t.fields.length}`;
-    case "array":
-      return `array<${wgslType(t.element)}, ${t.size}>`;
-    default:
-      throw new Error(`Cannot emit WGSL type for ${t.kind}`);
+  if (isScalar(t)) {
+    const mapped = SCALAR_MAP[t.name];
+    if (!mapped) throw new Error(`Unknown scalar type: ${t.name}`);
+    return mapped;
   }
+  if (isVector(t)) {
+    const prefix = VEC_TYPE_MAP[t.element] || "vec";
+    return `${prefix}<${t.element}>`;
+  }
+  if (isStructType(t)) return t.name;
+  if (isSampler(t)) return "sampler";
+  if (t.kind === "quaternion") return "vec4<f32>";
+  if (isMatrix(t)) {
+    const prefix = MAT_PREFIX_MAP[t.element] || "";
+    if (t.rows === t.columns) {
+      return `${prefix}mat${t.rows}x${t.rows}<${t.element}>`;
+    }
+    return `${prefix}mat${t.columns}x${t.rows}<${t.element}>`;
+  }
+  if (t.kind === "opaque") return t.name;
+  if (t.kind === "anonymousStruct") {
+    return `AnonStruct_${t.fields.length}`;
+  }
+  if (isArray(t)) {
+    return `array<${wgslType(t.element)}, ${t.size}>`;
+  }
+  throw new Error(`Cannot emit WGSL type for ${t.kind}`);
 }
 
 interface WgslContext {
@@ -180,7 +216,7 @@ function buildContext(
   }
   let samplerCounter = maxBinding + 1;
   for (const b of bindings) {
-    if (b.type.kind === "sampler") {
+    if (isSampler(b.type)) {
       samplerMap.set(b.name, {
         samplerBinding: samplerCounter++,
         samplerName: `${b.name}_sampler`,
@@ -226,14 +262,21 @@ export function generateWGSL(program: Program): string {
     throw new Error("No main function found — fragment shaders require an entry point");
   }
 
-  const mainFn = program.statements[mainIndex] as Extract<Statement, { kind: "FnDecl" }>;
+  const mainFnStmt = program.statements[mainIndex];
+  if (!mainFnStmt) {
+    throw new Error("main statement is undefined");
+  }
+  if (!isFnDecl(mainFnStmt)) {
+    throw new Error("main is not a function declaration");
+  }
+  const mainFn = mainFnStmt;
   const returnType = mainFn.returnType;
   if (mainFn.params.length > 0) {
     throw new Error("main must take no parameters");
   }
 
   const mainReturnStruct =
-    returnType.kind === "struct" ? returnType.name : null;
+    isStructType(returnType) ? returnType.name : null;
   const ctx = buildContext(program, mainReturnStruct);
 
   let anythingEmitted = false;
@@ -258,14 +301,14 @@ export function generateWGSL(program: Program): string {
     lines.push("");
   }
 
-  if (returnType.kind === "vector" && returnType.size === 4) {
+  if (isVector(returnType) && returnType.size === 4) {
     lines.push("@fragment");
     lines.push("fn main() -> @location(0) vec4<f32> {");
     for (const s of mainFn.body.statements) {
       emitStatement(lines, s, 1, ctx);
     }
     lines.push("}");
-  } else if (returnType.kind === "struct") {
+  } else if (isStructType(returnType)) {
     lines.push("@fragment");
     lines.push(`fn main() -> ${returnType.name} {`);
     for (const s of mainFn.body.statements) {
@@ -294,212 +337,214 @@ function emitStatement(
   ctx: WgslContext,
 ): void {
   const pad = "  ".repeat(indent);
-  switch (stmt.kind) {
-    case "StructDecl": {
-      const locations = ctx.structLocations.get(stmt.name);
-      lines.push(`${pad}struct ${stmt.name} {`);
-      for (const field of stmt.fields) {
-        let fieldDecl = `${field.name}: ${wgslType(field.type)}`;
-        if (locations) {
-          const loc = locations.get(field.name);
-          if (loc !== undefined) {
-            fieldDecl = `@location(${loc}) ${fieldDecl}`;
-          }
+  if (isStructDecl(stmt)) {
+    const locations = ctx.structLocations.get(stmt.name);
+    lines.push(`${pad}struct ${stmt.name} {`);
+    for (const field of stmt.fields) {
+      let fieldDecl = `${field.name}: ${wgslType(field.type)}`;
+      if (locations) {
+        const loc = locations.get(field.name);
+        if (loc !== undefined) {
+          fieldDecl = `@location(${loc}) ${fieldDecl}`;
         }
-        lines.push(`${pad}  ${fieldDecl},`);
       }
-      lines.push(`${pad}};`);
-      break;
+      lines.push(`${pad}  ${fieldDecl},`);
     }
-    case "EnumDecl": {
-      // WGSL has no native enum; document the variants as a comment.
-      const variants = stmt.variants.map((v) => v.name).join(", ");
-      lines.push(`${pad}// enum ${stmt.name} (${variants})`);
-      break;
-    }
-    case "BindingDecl": {
-      const group = 0;
-      if (stmt.type.kind === "sampler") {
-        const info = ctx.samplerMap.get(stmt.name);
-        const declType = samplerTextureType(stmt.type.name);
-        lines.push(
-          `${pad}@group(${group}) @binding(${stmt.binding}) var ${stmt.name}: ${declType};`,
-        );
-        if (info && !ctx.emittedSamplers.has(info.samplerBinding)) {
-          lines.push(
-            `${pad}@group(${group}) @binding(${info.samplerBinding}) var ${info.samplerName}: sampler;`,
-          );
-          ctx.emittedSamplers.add(info.samplerBinding);
-        }
-        break;
-      }
+    lines.push(`${pad}};`);
+    return;
+  }
+  if (isEnumDecl(stmt)) {
+    // WGSL has no native enum; document the variants as a comment.
+    const variants = stmt.variants.map((v) => v.name).join(", ");
+    lines.push(`${pad}// enum ${stmt.name} (${variants})`);
+    return;
+  }
+  if (isBindingDecl(stmt)) {
+    const group = 0;
+    if (isSampler(stmt.type)) {
+      const info = ctx.samplerMap.get(stmt.name);
+      const declType = samplerTextureType(stmt.type.name);
       lines.push(
-        `${pad}@group(${group}) @binding(${stmt.binding}) var<uniform> ${stmt.name}: ${wgslType(stmt.type)};`,
+        `${pad}@group(${group}) @binding(${stmt.binding}) var ${stmt.name}: ${declType};`,
       );
-      break;
+      if (info && !ctx.emittedSamplers.has(info.samplerBinding)) {
+        lines.push(
+          `${pad}@group(${group}) @binding(${info.samplerBinding}) var ${info.samplerName}: sampler;`,
+        );
+        ctx.emittedSamplers.add(info.samplerBinding);
+      }
+      return;
     }
-    case "FnDecl": {
-      const params = stmt.params
-        .map((p) => `${p.name}: ${wgslType(p.type)}`)
-        .join(", ");
-      lines.push(`${pad}fn ${stmt.name}(${params}): ${wgslType(stmt.returnType)} {`);
-      for (const s of stmt.body.statements) {
+    lines.push(
+      `${pad}@group(${group}) @binding(${stmt.binding}) var<uniform> ${stmt.name}: ${wgslType(stmt.type)};`,
+    );
+    return;
+  }
+  if (isFnDecl(stmt)) {
+    const params = stmt.params
+      .map((p) => `${p.name}: ${wgslType(p.type)}`)
+      .join(", ");
+    lines.push(`${pad}fn ${stmt.name}(${params}): ${wgslType(stmt.returnType)} {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isVarDecl(stmt)) {
+    if (stmt.initializer && isMatchExpr(stmt.initializer)) {
+      lines.push(`${pad}let ${stmt.name}: ${wgslType(stmt.type)};`);
+      emitMatchAssignStatement(lines, stmt.initializer, stmt.name, indent, ctx);
+      return;
+    }
+    let init = "";
+    if (stmt.initializer) {
+      init = ` = ${emitExpression(stmt.initializer, ctx)}`;
+    }
+    const kind = stmt.mutable ? "var" : "let";
+    lines.push(`${pad}${kind} ${stmt.name}: ${wgslType(stmt.type)}${init};`);
+    return;
+  }
+  if (isReturnStmt(stmt)) {
+    if (!stmt.value) {
+      lines.push(`${pad}return;`);
+      return;
+    }
+    lines.push(`${pad}return ${emitExpression(stmt.value, ctx)};`);
+    return;
+  }
+  if (isExpressionStmt(stmt)) {
+    if (isMatchExpr(stmt.expression)) {
+      emitMatchStatement(lines, stmt.expression, indent, ctx);
+      return;
+    }
+    lines.push(`${pad}${emitExpression(stmt.expression, ctx)};`);
+    return;
+  }
+  if (isBlock(stmt)) {
+    lines.push(`${pad}{`);
+    for (const s of stmt.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isIfStmt(stmt)) {
+    lines.push(`${pad}if ${emitExpression(stmt.condition, ctx)} {`);
+    for (const s of stmt.thenBranch.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
+    }
+    lines.push(`${pad}}`);
+    if (stmt.elseBranch) {
+      lines.push(`${pad}else {`);
+      for (const s of stmt.elseBranch.statements) {
         emitStatement(lines, s, indent + 1, ctx);
       }
       lines.push(`${pad}}`);
-      break;
     }
-    case "VarDecl": {
-      if (stmt.initializer && stmt.initializer.kind === "MatchExpr") {
-        lines.push(`${pad}let ${stmt.name}: ${wgslType(stmt.type)};`);
-        emitMatchAssignStatement(lines, stmt.initializer, stmt.name, indent, ctx);
-        break;
-      }
-      let init = "";
-      if (stmt.initializer) {
-        init = ` = ${emitExpression(stmt.initializer, ctx)}`;
-      }
-      const kind = stmt.mutable ? "var" : "let";
-      lines.push(`${pad}${kind} ${stmt.name}: ${wgslType(stmt.type)}${init};`);
-      break;
+    return;
+  }
+  if (isWhileStmt(stmt)) {
+    lines.push(`${pad}while ${emitExpression(stmt.condition, ctx)} {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
     }
-    case "ReturnStmt": {
-      if (!stmt.value) {
-        lines.push(`${pad}return;`);
-        break;
-      }
-      lines.push(`${pad}return ${emitExpression(stmt.value, ctx)};`);
-      break;
-    }
-    case "ExpressionStmt": {
-      if (stmt.expression.kind === "MatchExpr") {
-        emitMatchStatement(lines, stmt.expression, indent, ctx);
-        break;
-      }
-      lines.push(`${pad}${emitExpression(stmt.expression, ctx)};`);
-      break;
-    }
-    case "Block": {
-      lines.push(`${pad}{`);
-      for (const s of stmt.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "IfStmt": {
-      lines.push(`${pad}if ${emitExpression(stmt.condition, ctx)} {`);
-      for (const s of stmt.thenBranch.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
-      }
-      lines.push(`${pad}}`);
-      if (stmt.elseBranch) {
-        lines.push(`${pad}else {`);
-        for (const s of stmt.elseBranch.statements) {
-          emitStatement(lines, s, indent + 1, ctx);
-        }
-        lines.push(`${pad}}`);
-      }
-      break;
-    }
-    case "WhileStmt": {
-      lines.push(`${pad}while ${emitExpression(stmt.condition, ctx)} {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
-      }
-      lines.push(`${pad}}`);
-      break;
-    }
-    case "ForStmt": {
-      if (stmt.range) {
-        const { variable, start, end, inclusive } = stmt.range;
-        const startCode = emitExpression(start, ctx);
-        const endCode = emitExpression(end, ctx);
-        const condOp = inclusive ? "<=" : "<";
-        // Declare the loop variable directly so body references to it resolve.
-        lines.push(`${pad}var ${variable} = ${startCode};`);
-        lines.push(`${pad}loop {`);
-        lines.push(`${pad}  if (!(${variable} ${condOp} ${endCode})) {`);
-        lines.push(`${pad}    break;`);
-        lines.push(`${pad}  }`);
-        for (const s of stmt.body.statements) {
-          emitStatement(lines, s, indent + 2, ctx);
-        }
-        lines.push(`${pad}  ${variable} = ${variable} + 1;`);
-        lines.push(`${pad}}`);
-        break;
-      }
-      // C-style for: WGSL has no C-style for, lower to loop + break.
-      if (stmt.init) {
-        if (stmt.init.kind === "VarDecl") {
-          emitStatement(lines, stmt.init, indent, ctx);
-        } else if (stmt.init.kind === "ExpressionStmt") {
-          emitStatement(lines, stmt.init, indent, ctx);
-        }
-      }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isForStmt(stmt)) {
+    if (stmt.range) {
+      const { variable, start, end, inclusive } = stmt.range;
+      const startCode = emitExpression(start, ctx);
+      const endCode = emitExpression(end, ctx);
+      const condOp = inclusive ? "<=" : "<";
+      // Declare the loop variable directly so body references to it resolve.
+      lines.push(`${pad}var ${variable} = ${startCode};`);
       lines.push(`${pad}loop {`);
-      if (stmt.condition) {
-        lines.push(`${pad}  if (!(${emitExpression(stmt.condition, ctx)})) {`);
-        lines.push(`${pad}    break;`);
-        lines.push(`${pad}  }`);
-      }
+      lines.push(`${pad}  if (!(${variable} ${condOp} ${endCode})) {`);
+      lines.push(`${pad}    break;`);
+      lines.push(`${pad}  }`);
       for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
+        emitStatement(lines, s, indent + 2, ctx);
       }
-      if (stmt.increment) {
-        lines.push(`${pad}  ${emitExpression(stmt.increment, ctx)};`);
-      }
+      lines.push(`${pad}  ${variable} = ${variable} + 1;`);
       lines.push(`${pad}}`);
-      break;
+      return;
     }
-    case "DoWhileStmt": {
-      lines.push(`${pad}loop {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
+    // C-style for: WGSL has no C-style for, lower to loop + break.
+    if (stmt.init) {
+      if (isVarDecl(stmt.init)) {
+        emitStatement(lines, stmt.init, indent, ctx);
+      } else if (isExpressionStmt(stmt.init)) {
+        emitStatement(lines, stmt.init, indent, ctx);
       }
+    }
+    lines.push(`${pad}loop {`);
+    if (stmt.condition) {
       lines.push(`${pad}  if (!(${emitExpression(stmt.condition, ctx)})) {`);
       lines.push(`${pad}    break;`);
       lines.push(`${pad}  }`);
-      lines.push(`${pad}}`);
-      break;
     }
-    case "LoopStmt": {
-      lines.push(`${pad}loop {`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
-      }
-      lines.push(`${pad}}`);
-      break;
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
     }
-    case "BreakStmt": {
-      lines.push(`${pad}break;`);
-      break;
+    if (stmt.increment) {
+      lines.push(`${pad}  ${emitExpression(stmt.increment, ctx)};`);
     }
-    case "ContinueStmt": {
-      lines.push(`${pad}continue;`);
-      break;
-    }
-    case "PanicStmt": {
-      if (stmt.message) {
-        lines.push(`${pad}// panic: ${emitExpression(stmt.message, ctx)}`);
-      } else {
-        lines.push(`${pad}// panic`);
-      }
-      break;
-    }
-    case "UnreachableStmt": {
-      lines.push(`${pad}// unreachable`);
-      break;
-    }
-    case "DiscardStmt": {
-      lines.push(`${pad}discard;`);
-      break;
-    }
-    case "TypeAlias":
-    case "NewtypeDecl":
-    case "OpaqueDecl":
-      break;
+    lines.push(`${pad}}`);
+    return;
   }
+  if (isDoWhileStmt(stmt)) {
+    lines.push(`${pad}loop {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
+    }
+    lines.push(`${pad}  if (!(${emitExpression(stmt.condition, ctx)})) {`);
+    lines.push(`${pad}    break;`);
+    lines.push(`${pad}  }`);
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isLoopStmt(stmt)) {
+    lines.push(`${pad}loop {`);
+    for (const s of stmt.body.statements) {
+      emitStatement(lines, s, indent + 1, ctx);
+    }
+    lines.push(`${pad}}`);
+    return;
+  }
+  if (isBreakStmt(stmt)) {
+    lines.push(`${pad}break;`);
+    return;
+  }
+  if (isContinueStmt(stmt)) {
+    lines.push(`${pad}continue;`);
+    return;
+  }
+  if (isPanicStmt(stmt)) {
+    if (stmt.message) {
+      lines.push(`${pad}// panic: ${emitExpression(stmt.message, ctx)}`);
+    } else {
+      lines.push(`${pad}// panic`);
+    }
+    return;
+  }
+  if (isUnreachableStmt(stmt)) {
+    lines.push(`${pad}// unreachable`);
+    return;
+  }
+  if (isDiscardStmt(stmt)) {
+    lines.push(`${pad}discard;`);
+    return;
+  }
+  // TypeAlias, NewtypeDecl, OpaqueDecl — transparent
+}
+
+/**
+ * Type guard: enum decl.
+ */
+function isEnumDecl(s: Statement): s is Extract<Statement, { kind: "EnumDecl" }> {
+  return s.kind === "EnumDecl";
 }
 
 /**
@@ -510,84 +555,89 @@ function emitStatement(
  * @returns The WGSL expression string.
  */
 function emitExpression(expr: Expression, ctx: WgslContext): string {
-  switch (expr.kind) {
-    case "Identifier":
-      return expr.name;
-    case "Literal":
-      return emitLiteral(expr);
-    case "BinaryExpr":
-      return `(${emitExpression(expr.left, ctx)} ${expr.operator} ${emitExpression(expr.right, ctx)})`;
-    case "UnaryExpr":
-      return `(${expr.operator}${emitExpression(expr.operand, ctx)})`;
-    case "CallExpr": {
-      const calleeName =
-        expr.callee.kind === "Identifier"
-          ? expr.callee.name
-          : emitExpression(expr.callee, ctx);
-      const constructorName = CONSTRUCTOR_TYPE_MAP[calleeName];
-      const builtinName = WGSL_BUILTIN_NAME_MAP[calleeName];
-      const name = constructorName ?? builtinName ?? calleeName;
-      const args = expr.args.map((a) => emitExpression(a, ctx)).join(", ");
-      if (calleeName === "texture") {
-        // texture(tex, uv) -> textureSample(tex, sampler, uv)
-        const tex = emitExpression(expr.args[0]!, ctx);
-        const uv = emitExpression(expr.args[1]!, ctx);
-        const info = ctx.samplerMap.get(tex);
-        const samplerName = info ? info.samplerName : "sampler";
-        return `textureSample(${tex}, ${samplerName}, ${uv})`;
-      }
-      return `${name}(${args})`;
-    }
-    case "MemberExpr":
-      return `${emitExpression(expr.object, ctx)}.${expr.property}`;
-    case "SwizzleExpr": {
-      const swizzle = expr.components.join("");
-      return `${emitExpression(expr.object, ctx)}.${swizzle}`;
-    }
-    case "IndexExpr":
-      return `${emitExpression(expr.object, ctx)}[${emitExpression(expr.index, ctx)}]`;
-    case "StructLiteral": {
-      const fields = expr.fields.map((f) => {
-        if (f.name === null) return `..${emitExpression(f.value, ctx)}`;
-        return emitExpression(f.value, ctx);
-      }).join(", ");
-      return `${expr.typeName}(${fields})`;
-    }
-    case "ArrayLiteral": {
-      const elements = expr.elements.map((e) => emitExpression(e, ctx));
-      const elementType = inferWgslElementType(expr.elements[0]!);
-      return `array<${elementType}>(${elements.join(", ")})`;
-    }
-    case "CompoundAssignExpr": {
-      return `(${emitExpression(expr.target, ctx)} = ${emitExpression(expr.target, ctx)} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value, ctx)})`;
-    }
-    case "UpdateExpr": {
-      const op = expr.operator === "++" ? "+ 1" : "- 1";
-      const operandCode = emitExpression(expr.operand, ctx);
-      if (expr.prefix) {
-        return `(${operandCode} = ${operandCode} ${op}, ${operandCode})`;
-      }
-      return `(${operandCode} = ${operandCode} ${op})`;
-    }
-    case "ConditionalExpr": {
-      return `(${emitExpression(expr.test, ctx)} ? ${emitExpression(expr.consequent, ctx)} : ${emitExpression(expr.alternate, ctx)})`;
-    }
-    case "NullCoalescingExpr": {
-      return `(${emitExpression(expr.left, ctx)} != 0 ? ${emitExpression(expr.left, ctx)} : ${emitExpression(expr.right, ctx)})`;
-    }
-    case "MatchExpr": {
-      return emitMatchExpression(expr, ctx);
-    }
-    case "BlockExpr": {
-      const stmts = expr.block.statements;
-      if (stmts.length === 0) return "0.0";
-      const last = stmts[stmts.length - 1]!;
-      if (last.kind === "ExpressionStmt") {
-        return emitExpression(last.expression, ctx);
-      }
-      return "0.0";
-    }
+  if (isIdentifier(expr)) {
+    return expr.name;
   }
+  if (isLiteral(expr)) {
+    return emitLiteral(expr);
+  }
+  if (isBinaryExpr(expr)) {
+    return `(${emitExpression(expr.left, ctx)} ${expr.operator} ${emitExpression(expr.right, ctx)})`;
+  }
+  if (isUnaryExpr(expr)) {
+    return `(${expr.operator}${emitExpression(expr.operand, ctx)})`;
+  }
+  if (isCallExpr(expr)) {
+    const calleeName =
+      expr.callee.kind === "Identifier"
+        ? expr.callee.name
+        : emitExpression(expr.callee, ctx);
+    const constructorName = CONSTRUCTOR_TYPE_MAP[calleeName];
+    const builtinName = WGSL_BUILTIN_NAME_MAP[calleeName];
+    const name = constructorName ?? builtinName ?? calleeName;
+    const args = expr.args.map((a) => emitExpression(a, ctx)).join(", ");
+    if (calleeName === "texture") {
+      // texture(tex, uv) -> textureSample(tex, sampler, uv)
+      const tex = emitExpression(expr.args[0]!, ctx);
+      const uv = emitExpression(expr.args[1]!, ctx);
+      const info = ctx.samplerMap.get(tex);
+      const samplerName = info ? info.samplerName : "sampler";
+      return `textureSample(${tex}, ${samplerName}, ${uv})`;
+    }
+    return `${name}(${args})`;
+  }
+  if (isMemberExpr(expr)) {
+    return `${emitExpression(expr.object, ctx)}.${expr.property}`;
+  }
+  if (isSwizzleExpr(expr)) {
+    const swizzle = expr.components.join("");
+    return `${emitExpression(expr.object, ctx)}.${swizzle}`;
+  }
+  if (isIndexExpr(expr)) {
+    return `${emitExpression(expr.object, ctx)}[${emitExpression(expr.index, ctx)}]`;
+  }
+  if (isStructLiteral(expr)) {
+    const fields = expr.fields.map((f) => {
+      if (f.name === null) return `..${emitExpression(f.value, ctx)}`;
+      return emitExpression(f.value, ctx);
+    }).join(", ");
+    return `${expr.typeName}(${fields})`;
+  }
+  if (isArrayLiteral(expr)) {
+    const elements = expr.elements.map((e) => emitExpression(e, ctx));
+    const elementType = inferWgslElementType(expr.elements[0]!);
+    return `array<${elementType}>(${elements.join(", ")})`;
+  }
+  if (isCompoundAssignExpr(expr)) {
+    return `(${emitExpression(expr.target, ctx)} = ${emitExpression(expr.target, ctx)} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value, ctx)})`;
+  }
+  if (isUpdateExpr(expr)) {
+    const op = expr.operator === "++" ? "+ 1" : "- 1";
+    const operandCode = emitExpression(expr.operand, ctx);
+    if (expr.prefix) {
+      return `(${operandCode} = ${operandCode} ${op}, ${operandCode})`;
+    }
+    return `(${operandCode} = ${operandCode} ${op})`;
+  }
+  if (isConditionalExpr(expr)) {
+    return `(${emitExpression(expr.test, ctx)} ? ${emitExpression(expr.consequent, ctx)} : ${emitExpression(expr.alternate, ctx)})`;
+  }
+  if (isNullCoalescingExpr(expr)) {
+    return `(${emitExpression(expr.left, ctx)} != 0 ? ${emitExpression(expr.left, ctx)} : ${emitExpression(expr.right, ctx)})`;
+  }
+  if (isMatchExpr(expr)) {
+    return emitMatchExpression(expr, ctx);
+  }
+  if (isBlockExpr(expr)) {
+    const stmts = expr.block.statements;
+    if (stmts.length === 0) return "0.0";
+    const last = stmts[stmts.length - 1]!;
+    if (isExpressionStmt(last)) {
+      return emitExpression(last.expression, ctx);
+    }
+    return "0.0";
+  }
+  throw new Error("Cannot emit WGSL expression");
 }
 
 /**
@@ -598,25 +648,39 @@ function emitExpression(expr: Expression, ctx: WgslContext): string {
  * @returns The WGSL expression string.
  */
 function emitMatchExpression(expr: Expression, ctx: WgslContext): string {
-  const matchExpr = expr as Extract<Expression, { kind: "MatchExpr" }>;
-  const subjectCode = emitExpression(matchExpr.subject, ctx);
+  if (!isMatchExpr(expr)) throw new Error("Not a match expression");
+  const subjectCode = emitExpression(expr.subject, ctx);
   const branches: string[] = [];
-  for (let i = 0; i < matchExpr.arms.length; i++) {
-    const arm = matchExpr.arms[i]!;
+  for (let i = 0; i < expr.arms.length; i++) {
+    const arm = expr.arms[i]!;
     let condition = "true";
-    if (arm.pattern.kind === "literal" && arm.pattern.value !== null) {
+    if (isLiteralPattern(arm.pattern) && arm.pattern.value !== null) {
       condition = `(${subjectCode} == ${arm.pattern.value})`;
-    } else if (arm.pattern.kind === "binding") {
+    } else if (isBindingPattern(arm.pattern)) {
       condition = "true";
     }
     const bodyCode = emitMatchBodyToString(arm.body.statements, ctx);
-    if (i === matchExpr.arms.length - 1) {
+    if (i === expr.arms.length - 1) {
       branches.push(`else { ${bodyCode} }`);
     } else {
       branches.push(`if (${condition}) { ${bodyCode} }`);
     }
   }
   return `(${branches.join(" ")})`;
+}
+
+/**
+ * Type guard: literal pattern.
+ */
+function isLiteralPattern(p: { kind: string }): p is { kind: "literal"; value: number | string | boolean } {
+  return p.kind === "literal";
+}
+
+/**
+ * Type guard: binding pattern.
+ */
+function isBindingPattern(p: { kind: string }): p is { kind: "binding"; binding: string } {
+  return p.kind === "binding";
 }
 
 /**
@@ -633,16 +697,16 @@ function emitMatchStatement(
   indent: number,
   ctx: WgslContext,
 ): void {
-  const matchExpr = expr as Extract<Expression, { kind: "MatchExpr" }>;
+  if (!isMatchExpr(expr)) throw new Error("Not a match expression");
   const pad = "  ".repeat(indent);
-  const subjectCode = emitExpression(matchExpr.subject, ctx);
-  for (let i = 0; i < matchExpr.arms.length; i++) {
-    const arm = matchExpr.arms[i]!;
+  const subjectCode = emitExpression(expr.subject, ctx);
+  for (let i = 0; i < expr.arms.length; i++) {
+    const arm = expr.arms[i]!;
     let condition = "true";
-    if (arm.pattern.kind === "literal" && arm.pattern.value !== null) {
+    if (isLiteralPattern(arm.pattern) && arm.pattern.value !== null) {
       condition = `(${subjectCode} == ${arm.pattern.value})`;
     }
-    const isLast = i === matchExpr.arms.length - 1;
+    const isLast = i === expr.arms.length - 1;
     const keyword =
       i === 0
         ? `if (${condition})`
@@ -674,16 +738,16 @@ function emitMatchAssignStatement(
   indent: number,
   ctx: WgslContext,
 ): void {
-  const matchExpr = expr as Extract<Expression, { kind: "MatchExpr" }>;
+  if (!isMatchExpr(expr)) throw new Error("Not a match expression");
   const pad = "  ".repeat(indent);
-  const subjectCode = emitExpression(matchExpr.subject, ctx);
-  for (let i = 0; i < matchExpr.arms.length; i++) {
-    const arm = matchExpr.arms[i]!;
+  const subjectCode = emitExpression(expr.subject, ctx);
+  for (let i = 0; i < expr.arms.length; i++) {
+    const arm = expr.arms[i]!;
     let condition = "true";
-    if (arm.pattern.kind === "literal" && arm.pattern.value !== null) {
+    if (isLiteralPattern(arm.pattern) && arm.pattern.value !== null) {
       condition = `(${subjectCode} == ${arm.pattern.value})`;
     }
-    const isLast = i === matchExpr.arms.length - 1;
+    const isLast = i === expr.arms.length - 1;
     const keyword =
       i === 0
         ? `if (${condition})`
@@ -718,7 +782,7 @@ function emitMatchBodyAssigning(
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i]!;
     const isLast = i === lastIdx;
-    if (isLast && s.kind === "ExpressionStmt") {
+    if (isLast && isExpressionStmt(s)) {
       lines.push(`${pad}${target} = ${emitExpression(s.expression, ctx)};`);
     } else {
       emitStatement(lines, s, indent, ctx);
@@ -737,28 +801,28 @@ function emitMatchBodyAssigning(
 function emitMatchBodyToString(stmts: Statement[], ctx: WgslContext): string {
   const parts: string[] = [];
   for (const s of stmts) {
-    if (s.kind === "ReturnStmt") {
+    if (isReturnStmt(s)) {
       if (s.value) {
         parts.push(`return ${emitExpression(s.value, ctx)};`);
       } else {
         parts.push("return;");
       }
-    } else if (s.kind === "ExpressionStmt") {
+    } else if (isExpressionStmt(s)) {
       parts.push(`${emitExpression(s.expression, ctx)};`);
-    } else if (s.kind === "VarDecl") {
+    } else if (isVarDecl(s)) {
       let init = "";
       if (s.initializer) {
         init = ` = ${emitExpression(s.initializer, ctx)}`;
       }
       const kind = s.mutable ? "var" : "let";
       parts.push(`${kind} ${s.name}: ${wgslType(s.type)}${init};`);
-    } else if (s.kind === "Block") {
+    } else if (isBlock(s)) {
       parts.push("{ ");
       for (const inner of s.statements) {
         parts.push(emitMatchBodyToString([inner], ctx));
       }
       parts.push(" }");
-    } else if (s.kind === "IfStmt") {
+    } else if (isIfStmt(s)) {
       parts.push(`if (${emitExpression(s.condition, ctx)}) { `);
       for (const inner of s.thenBranch.statements) {
         parts.push(emitMatchBodyToString([inner], ctx));
@@ -771,11 +835,11 @@ function emitMatchBodyToString(stmts: Statement[], ctx: WgslContext): string {
         }
         parts.push(" }");
       }
-    } else if (s.kind === "DiscardStmt") {
+    } else if (isDiscardStmt(s)) {
       parts.push("discard;");
-    } else if (s.kind === "BreakStmt") {
+    } else if (isBreakStmt(s)) {
       parts.push("break;");
-    } else if (s.kind === "ContinueStmt") {
+    } else if (isContinueStmt(s)) {
       parts.push("continue;");
     }
   }
@@ -789,10 +853,10 @@ function emitMatchBodyToString(stmts: Statement[], ctx: WgslContext): string {
  * @returns The WGSL element type string.
  */
 function inferWgslElementType(expr: Expression): string {
-  if (expr.kind === "Literal") {
-    if (expr.literalKind === "int") return "i32";
-    if (expr.literalKind === "float") return "f32";
-    if (expr.literalKind === "bool") return "bool";
+  if (isLiteral(expr)) {
+    if (isLiteralOfKind(expr, "int")) return "i32";
+    if (isLiteralOfKind(expr, "float")) return "f32";
+    if (isLiteralOfKind(expr, "bool")) return "bool";
   }
   return "f32";
 }
@@ -804,18 +868,18 @@ function inferWgslElementType(expr: Expression): string {
  * @returns The WGSL literal string.
  */
 function emitLiteral(expr: Extract<Expression, { kind: "Literal" }>): string {
-  const { value, literalKind } = expr;
-  if (literalKind === "bool") return value ? "true" : "false";
-  if (literalKind === "int") return `${typeof value === "number" ? value : Number(value)}`;
-  if (literalKind === "float") {
+  const { value } = expr;
+  if (isLiteralOfKind(expr, "bool")) return value ? "true" : "false";
+  if (isLiteralOfKind(expr, "int")) return `${typeof value === "number" ? value : Number(value)}`;
+  if (isLiteralOfKind(expr, "float")) {
     const f = typeof value === "number" ? value : Number(value);
     if (Number.isInteger(f)) return `${f}.0`;
     return String(f);
   }
-  if (literalKind === "char") {
+  if (isLiteralOfKind(expr, "char")) {
     return charToCode(typeof value === "string" ? value : String(value)).toString();
   }
-  if (literalKind === "color") {
+  if (isLiteralOfKind(expr, "color")) {
     return `0x${typeof value === "string" ? value : String(value)}`;
   }
   return String(value);
