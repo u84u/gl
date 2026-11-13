@@ -37,8 +37,5 @@
     "tsx": "^4.23.15",
     "typescript": "^5.8.0",
     "vitest": "^5.1.0"
-  },
-  "dependencies": {
-    "@u84u/gl": "github:u84u/gl"
   }
 }
