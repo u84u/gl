@@ -1,6 +1,6 @@
 import { tokenize } from "./lexer";
 import { parse } from "./parser";
-import { typeCheck } from "./typechecker";
+import { typeCheck, Diagnostic } from "./typechecker";
 import { generateGLSL } from "./codegen/glsl";
 import { generateWGSL } from "./codegen/wgsl";
 import {
@@ -17,21 +17,55 @@ import {
   NewtypeDecl,
   OpaqueDecl,
 } from "./types";
-import { Diagnostic } from "./typechecker";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 
+/* ------------------------------------------------------------------ */
+/* AST builders                                                         */
+/* ------------------------------------------------------------------ */
+
+export {
+  span,
+  // Types
+  scalarType, i8, u8, i16, u16, i32, u32, i64, u64, f16, f32, f64, bf16, boolType,
+  vectorType, vec2, vec3, vec4, ivec2, ivec3, ivec4, uvec2, uvec3, uvec4,
+  bvec2, bvec3, bvec4, dvec2, dvec3, dvec4, matrixType, mat2, mat3, mat4,
+  mat2x3, mat3x2, dmat3, quatType, structType, enumType, samplerType,
+  sampler2D, sampler3D, samplerCube, arrayType, tupleType, optionType,
+  resultType, aliasType, opaqueType, anonymousStructType, unionType,
+  // Fields / Params
+  field, param,
+  // Statements
+  structDecl, enumDecl, fnDecl, bindingDecl, importDecl, varDecl,
+  returnStmt, expressionStmt, block, ifStmt, whileStmt, forStmt,
+  rangeForStmt, doWhileStmt, loopStmt, breakStmt, continueStmt,
+  discardStmt, panicStmt, unreachableStmt,
+  // Expressions
+  ident, int, float, bool as boolLiteral, binary, unary, call, member,
+  swizzle, index, structLiteral, arrayLiteral, compoundAssign, update,
+  conditional, nullCoalescing, match, blockExpr,
+  // Patterns
+  literalPattern, bindingPattern, wildcardPattern, arm,
+  // Declarations
+  typeAlias, newtypeDecl, opaqueDecl, traitDecl, implBlock,
+  // Program
+  program, mainFn, mainVec4,
+} from "./ast";
+
 /**
- * Options for compiling a gl source file.
+ * Options for compiling a gl source file or AST.
  */
 export interface CompileOptions {
   target: "glsl" | "wgsl";
-  source: string;
   file: string;
+  /** Source text to parse and compile (mutually exclusive with `ast`). */
+  source?: string;
+  /** Pre-built AST to type-check and codegen (mutually exclusive with `source`). */
+  ast?: Program;
 }
 
 /**
- * Result of compiling a gl source file.
+ * Result of compiling a gl source file or AST.
  */
 export interface CompileResult {
   code: string | null;
@@ -180,15 +214,98 @@ function collectDeclarations(
 }
 
 /**
- * Compiles a gl source file to the target language.
+ * Compiles a pre-built Program AST to the target language.
  *
- * Performs import resolution, parsing, type checking, and code generation
- * in a single pipeline.
+ * Skips parsing and import resolution; runs type checking and code
+ * generation directly on the supplied AST.
  *
- * @param options - Compilation options (target, source, file path).
+ * @param ast - The Program AST to compile.
+ * @param file - The source file path (used for diagnostics).
+ * @param target - The target language ("glsl" or "wgsl").
+ * @returns CompileResult containing generated code (or null on error), the AST, and diagnostics.
+ */
+function compileProgram(
+  ast: Program,
+  file: string,
+  target: "glsl" | "wgsl",
+): CompileResult {
+  const diagnostics: Diagnostic[] = [];
+
+  try {
+    const typeResult = typeCheck(ast, file);
+    diagnostics.push(...typeResult.diagnostics);
+  } catch (err) {
+    diagnostics.push({
+      file,
+      span: { line: 1, column: 1 },
+      message: formatError(err),
+    });
+    return { code: null, ast, diagnostics };
+  }
+
+  const hasErrors = diagnostics.length > 0;
+
+  let code: string | null = null;
+  if (!hasErrors) {
+    try {
+      switch (target) {
+        case "glsl":
+          code = generateGLSL(ast);
+          break;
+        case "wgsl":
+          code = generateWGSL(ast);
+          break;
+        default:
+          throw new Error(`Unknown target: ${target}`);
+      }
+    } catch (err) {
+      diagnostics.push({
+        file,
+        span: { line: 1, column: 1 },
+        message: formatError(err),
+      });
+      return { code: null, ast, diagnostics };
+    }
+  }
+
+  return { code, ast, diagnostics };
+}
+
+/**
+ * Compiles a gl source file or pre-built AST to the target language.
+ *
+ * When `source` is given, performs import resolution, parsing, type
+ * checking, and code generation in a single pipeline. When `ast` is
+ * given, skips parsing and import resolution and runs type checking and
+ * code generation directly on the supplied AST.
+ *
+ * @param options - Compilation options (target, file, and either `source` or `ast`).
  * @returns CompileResult containing generated code (or null on error), the AST, and diagnostics.
  */
 export function compile(options: CompileOptions): CompileResult {
+  const { target, file } = options;
+
+  // AST-based path: skip parsing / imports
+  if (options.ast) {
+    return compileProgram(options.ast, file, target);
+  }
+
+  // Source-based path: parse + imports + typecheck + codegen
+  const source = options.source;
+  if (!source) {
+    return {
+      code: null,
+      ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
+      diagnostics: [
+        {
+          file,
+          span: { line: 1, column: 1 },
+          message: "Either 'source' or 'ast' must be provided",
+        },
+      ],
+    };
+  }
+
   const structs = new Map<string, StructDecl>();
   const functions = new Map<string, FnDecl>();
   const bindings = new Map<string, BindingDecl>();
@@ -204,8 +321,8 @@ export function compile(options: CompileOptions): CompileResult {
 
   try {
     collectDeclarations(
-      options.source,
-      options.file,
+      source,
+      file,
       visited,
       structs,
       functions,
@@ -221,53 +338,24 @@ export function compile(options: CompileOptions): CompileResult {
     );
   } catch (err) {
     diagnostics.push({
-      file: options.file,
+      file,
       span: { line: 1, column: 1 },
       message: formatError(err),
     });
-    return { code: null, ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } }, diagnostics };
+    return {
+      code: null,
+      ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
+      diagnostics,
+    };
   }
 
-  const ast: Program = { kind: "Program", statements: allStatements, span: { line: 1, column: 1 } };
+  const ast: Program = {
+    kind: "Program",
+    statements: allStatements,
+    span: { line: 1, column: 1 },
+  };
 
-  try {
-    const typeResult = typeCheck(ast, options.file);
-    diagnostics.push(...typeResult.diagnostics);
-  } catch (err) {
-    diagnostics.push({
-      file: options.file,
-      span: { line: 1, column: 1 },
-      message: formatError(err),
-    });
-    return { code: null, ast, diagnostics };
-  }
-
-  const hasErrors = diagnostics.length > 0;
-
-  let code: string | null = null;
-  if (!hasErrors) {
-    try {
-      switch (options.target) {
-        case "glsl":
-          code = generateGLSL(ast);
-          break;
-        case "wgsl":
-          code = generateWGSL(ast);
-          break;
-        default:
-          throw new Error(`Unknown target: ${options.target}`);
-      }
-    } catch (err) {
-      diagnostics.push({
-        file: options.file,
-        span: { line: 1, column: 1 },
-        message: formatError(err),
-      });
-      return { code: null, ast, diagnostics };
-    }
-  }
-
-  return { code, ast, diagnostics };
+  return compileProgram(ast, file, target);
 }
 
 export { tokenize, parse, typeCheck, generateGLSL, generateWGSL };
