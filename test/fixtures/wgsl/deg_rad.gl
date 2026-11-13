@@ -1,0 +1,5 @@
+fn main(): vec4 {
+  let x: f32 = deg(1.0)
+  let y: f32 = rad(1.0)
+  return vec4(x, y, 0.0, 1.0)
+}

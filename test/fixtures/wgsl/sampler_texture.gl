@@ -1,0 +1,7 @@
+@binding(0) uniform tex: sampler2D
+
+fn main(): vec4 {
+  let uv: vec2 = vec2(0.5, 0.5)
+  let col: vec4 = texture(tex, uv)
+  return col
+}

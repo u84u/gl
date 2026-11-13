@@ -1,0 +1,13 @@
+fn main(): vec4 {
+  let x: f32 = abs(-1.0)
+  let y: f32 = sin(1.0)
+  let z: f32 = cos(1.0)
+  let p: f32 = pow(2.0, 3.0)
+  let r: f32 = sqrt(4.0)
+  let fl: f32 = floor(1.5)
+  let fr: f32 = fract(1.5)
+  let mn: f32 = min(1.0, 2.0)
+  let mx: f32 = max(1.0, 2.0)
+  let cl: f32 = clamp(0.5, 0.0, 1.0)
+  return vec4(x, y, z, 1.0)
+}

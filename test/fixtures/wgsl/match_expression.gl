@@ -1,0 +1,9 @@
+fn main(): vec4 {
+  let x: i32 = 1
+  let result: f32 = match x {
+    1 => { 10.0 }
+    2 => { 20.0 }
+    _ => { 0.0 }
+  }
+  return vec4(result, 0.0, 0.0, 1.0)
+}

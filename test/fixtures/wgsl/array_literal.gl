@@ -1,0 +1,4 @@
+fn main(): vec4 {
+  let arr: [f32; 3] = [1.0, 2.0, 3.0]
+  return vec4(arr[0], arr[1], arr[2], 1.0)
+}
