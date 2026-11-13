@@ -20,10 +20,6 @@ import {
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 
-/* ------------------------------------------------------------------ */
-/* AST builders                                                         */
-/* ------------------------------------------------------------------ */
-
 export {
   span,
   // Types
