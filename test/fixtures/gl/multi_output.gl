@@ -1,0 +1,5 @@
+struct FragOutput { f32 r, f32 g, f32 b, f32 a, f32 depth }
+
+fn main(): FragOutput {
+  return { .r = 1.0, .g = 0.5, .b = 0.25, .a = 1.0, .depth = 0.5 }
+}

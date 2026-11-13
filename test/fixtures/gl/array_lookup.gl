@@ -1,0 +1,5 @@
+@binding(0) uniform colors: [vec4; 4]
+
+fn main(): vec4 {
+  return colors[0]
+}

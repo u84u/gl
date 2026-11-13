@@ -1,0 +1,8 @@
+import "./colors.gl"
+
+@binding(0) uniform time: f32
+
+fn main(): vec4 {
+  let c: Color = { .r = 1.0, .g = 0.5, .b = 0.25, .a = 1.0 }
+  return vec4(c.r * time, c.g * time, c.b * time, c.a)
+}

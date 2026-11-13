@@ -1,0 +1,41 @@
+{
+  "name": "@u84u/gl",
+  "version": "0.1.0",
+  "description": "Compiler for the gl shading language, transpiling to GLSL (and WGSL later)",
+  "main": "dist/index.js",
+  "bin": {
+    "gl": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "build:validate": "tsx scripts/validate.ts build",
+    "validate": "tsx scripts/validate.ts validate",
+    "lsp": "tsx src/lsp/server.ts"
+  },
+  "keywords": [
+    "glsl",
+    "wgsl",
+    "shader",
+    "compiler",
+    "transpiler"
+  ],
+  "author": "u84u",
+  "license": "CC-BY-4.0",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.1.0",
+    "commander": "^13.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0",
+    "tsx": "^4.23.15",
+    "vitest": "^5.1.0"
+  }
+}

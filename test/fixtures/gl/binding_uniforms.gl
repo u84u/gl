@@ -1,0 +1,6 @@
+@binding(0) uniform time: f32
+@binding(1) uniform color: vec4
+
+fn main(): vec4 {
+  return vec4(color.rgb * time, color.a)
+}
