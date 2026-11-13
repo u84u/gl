@@ -1213,7 +1213,7 @@ describe("codegen/wgsl", () => {
         return texture(tex, vec2(0.5, 0.5))
       }
     `);
-    expect(code).toContain("textureSample(tex, sampler, vec2<f32>(0.5, 0.5))");
+    expect(code).toContain("textureSample(tex, tex_sampler, vec2<f32>(0.5, 0.5))");
   });
 
   it("emits built-in math functions", () => {
@@ -1274,5 +1274,122 @@ describe("codegen/wgsl", () => {
         }
       `)
     ).toThrow("No main function found");
+  });
+
+  it("emits enum declaration as comment", () => {
+    const code = compileToWGSL(`
+      enum Color { Red, Green, Blue }
+      fn main(): vec4 {
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("// enum Color (Red, Green, Blue)");
+  });
+
+  it("emits match as statement if-else chain", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: i32 = 1
+        match x {
+          1 => { return vec4(1.0, 0.0, 0.0, 1.0) }
+          2 => { return vec4(0.0, 1.0, 0.0, 1.0) }
+          _ => { return vec4(0.0, 0.0, 1.0, 1.0) }
+        }
+        return vec4(0.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("if ((x == 1)) {");
+    expect(code).toContain("else if ((x == 2)) {");
+    expect(code).toContain("else {");
+  });
+
+  it("emits match as expression value with temp variable", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: i32 = 1
+        let result: f32 = match x {
+          1 => { 10.0 }
+          2 => { 20.0 }
+          _ => { 0.0 }
+        }
+        return vec4(result, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("let result: f32;");
+    expect(code).toContain("result = 10.0;");
+    expect(code).toContain("result = 20.0;");
+    expect(code).toContain("result = 0.0;");
+  });
+
+  it("emits range-based for loop", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let mut i: i32 = 0
+        for x in 0..3 {
+          i += 1
+        }
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("var x = 0;");
+    expect(code).toContain("loop {");
+    expect(code).toContain("if (!(x < 3)) {");
+    expect(code).toContain("x = x + 1;");
+  });
+
+  it("emits inclusive range-based for loop", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let mut i: i32 = 0
+        for x in 0..=2 {
+          i += 1
+        }
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("if (!(x <= 2)) {");
+  });
+
+  it("emits array literal with element type", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let arr: [f32; 3] = [1.0, 2.0, 3.0]
+        return vec4(arr[0], arr[1], arr[2], 1.0)
+      }
+    `);
+    expect(code).toContain("array<f32, 3>");
+    expect(code).toContain("array<f32>(1.0, 2.0, 3.0)");
+  });
+
+  it("emits struct return with location attributes", () => {
+    const code = compileToWGSL(`
+      struct FragOutput { f32 r, f32 g, f32 b, f32 a, f32 depth }
+      fn main(): FragOutput {
+        return { .r = 1.0, .g = 0.5, .b = 0.25, .a = 1.0, .depth = 0.5 }
+      }
+    `);
+    expect(code).toContain("@location(0) r: f32,");
+    expect(code).toContain("@location(4) depth: f32,");
+    expect(code).toContain("fn main() -> FragOutput {");
+  });
+
+  it("emits texture and vector built-ins", () => {
+    const code = compileToWGSL(`
+      @binding(0) uniform tex: sampler2D
+      fn main(): vec4 {
+        let uv: vec2 = vec2(0.5, 0.5)
+        let col: vec4 = texture(tex, uv)
+        let d: f32 = dot(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0))
+        let n: vec3 = normalize(vec3(1.0, 0.0, 0.0))
+        let l: f32 = length(vec3(1.0, 0.0, 0.0))
+        let c: vec3 = mix(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), 0.5)
+        return vec4(col.rgb, col.a)
+      }
+    `);
+    expect(code).toContain("textureSample(tex, tex_sampler, uv)");
+    expect(code).toContain("dot(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0))");
+    expect(code).toContain("normalize(vec3<f32>(1.0, 0.0, 0.0))");
+    expect(code).toContain("length(vec3<f32>(1.0, 0.0, 0.0))");
+    expect(code).toContain("mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), 0.5)");
   });
 });

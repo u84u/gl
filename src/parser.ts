@@ -364,12 +364,13 @@ export class Parser {
     const startSpan = this.spanOf(forToken);
     // Range-based for: for x in start..end { ... }
     if (this.check("Ident") && !this.check("LParen")) {
-      this.consume("Ident", "Expect loop variable name.");
+      const variable = this.consume("Ident", "Expect loop variable name.").lexeme;
       this.consume("In", "Expect 'in' after loop variable name.");
       const start = this.expression();
       this.consume("Range", "Expect '..' in range expression.");
+      // Optional '=' for inclusive range: start..=end
+      const inclusive = this.match("Assign");
       const end = this.expression();
-      const inclusive = this.match("Eq"); // optional = for inclusive range ..=
       this.consume("LBrace", "Expect '{' before for body.");
       const body = this.block();
       return {
@@ -377,7 +378,7 @@ export class Parser {
         init: null,
         condition: null,
         increment: null,
-        range: { start, end, inclusive },
+        range: { variable, start, end, inclusive },
         body,
         span: startSpan,
       };
@@ -924,6 +925,9 @@ export class Parser {
       const expr = this.expression();
       this.consume("RParen", "Expect ')' after expression.");
       return expr;
+    }
+    if (this.match("Match")) {
+      return this.matchExpression();
     }
     throw new ParseError(this.peek(), "Expect expression.");
   }
