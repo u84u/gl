@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { tokenize } from "../src/lexer";
 import { parse } from "../src/parser";
+import { compile } from "../src/index";
 import { generateGLSL } from "../src/codegen/glsl";
 
 function compileToGLSL(source: string) {
@@ -1005,5 +1006,273 @@ describe("codegen/glsl", () => {
       }
     `);
     expect(code).toContain("// panic");
+  });
+});
+
+describe("codegen/wgsl", () => {
+  function compileToWGSL(source: string) {
+    const result = compile({ source, target: "wgsl", file: "test.wgsl" });
+    if (result.diagnostics.length > 0) {
+      throw new Error(
+        `WGSL compile errors: ${result.diagnostics.map((d) => d.message).join(", ")}`
+      );
+    }
+    if (!result.code) {
+      throw new Error("No WGSL code generated");
+    }
+    return result.code;
+  }
+
+  it("emits main as @fragment returning @location(0) vec4<f32>", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("@fragment");
+    expect(code).toContain("fn main() -> @location(0) vec4<f32> {");
+    expect(code).toContain("return vec4<f32>(1.0, 0.0, 0.0, 1.0);");
+    expect(code).toContain("}");
+  });
+
+  it("emits struct declarations", () => {
+    const code = compileToWGSL(`
+      struct Point { i32 x, i32 y }
+      fn main(): vec4 {
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("struct Point {");
+    expect(code).toContain("x: i32,");
+    expect(code).toContain("y: i32,");
+    expect(code).toContain("};");
+  });
+
+  it("emits variable declarations", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = 1.0
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("let x: f32 = 1.0;");
+    expect(code).toContain("return vec4<f32>(x, 0.0, 0.0, 1.0);");
+  });
+
+  it("emits mutable variable declarations", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let mut x: f32 = 1.0
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("var x: f32 = 1.0;");
+  });
+
+  it("emits struct literal as constructor call", () => {
+    const code = compileToWGSL(`
+      struct Color { f32 r, f32 g, f32 b, f32 a }
+      fn main(): vec4 {
+        let c: Color = { .r = 1.0, .g = 0.5, .b = 0.25, .a = 1.0 }
+        return vec4(c.r, c.g, c.b, c.a)
+      }
+    `);
+    expect(code).toContain("Color(1.0, 0.5, 0.25, 1.0)");
+  });
+
+  it("emits member access and swizzle", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let v: vec4 = vec4(1.0, 0.0, 0.0, 1.0)
+        return vec4(v.x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("v.x");
+  });
+
+  it("emits swizzle expressions", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let v: vec4 = vec4(1.0, 0.0, 0.0, 1.0)
+        return vec4(v.rgb, 1.0)
+      }
+    `);
+    expect(code).toContain("v.rgb");
+  });
+
+  it("emits binary expressions with parentheses", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = 1.0 + 2.0 * 3.0
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("(1.0 + (2.0 * 3.0))");
+  });
+
+  it("emits unary expressions", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = -1.0
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("(-1.0)");
+  });
+
+  it("emits function calls", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        return vec4(dot(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)), 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("dot(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0))");
+  });
+
+  it("emits if-else statements", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = 1.0
+        if (x > 0.5) {
+          return vec4(1.0, 0.0, 0.0, 1.0)
+        } else {
+          return vec4(0.0, 0.0, 0.0, 1.0)
+        }
+      }
+    `);
+    expect(code).toContain("if (x > 0.5) {");
+    expect(code).toContain("else {");
+  });
+
+  it("emits while loops", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let mut i: i32 = 0
+        while (i < 5) {
+          i += 1
+        }
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("while (i < 5) {");
+    expect(code).toContain("(i = i + 1)");
+  });
+
+  it("emits loop, break and continue", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        loop {
+          break
+          continue
+        }
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("loop {");
+    expect(code).toContain("break;");
+    expect(code).toContain("continue;");
+  });
+
+  it("emits discard", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        discard
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("discard;");
+  });
+
+  it("emits binding uniforms", () => {
+    const code = compileToWGSL(`
+      @binding(0) uniform time: f32
+      @binding(1) uniform color: vec4
+      fn main(): vec4 {
+        return color
+      }
+    `);
+    expect(code).toContain("@group(0) @binding(0) var<uniform> time: f32;");
+    expect(code).toContain("@group(0) @binding(1) var<uniform> color: vec<f32>;");
+    expect(code).toContain("@fragment");
+  });
+
+  it("emits sampler2D binding as texture", () => {
+    const code = compileToWGSL(`
+      @binding(0) uniform tex: sampler2D
+      fn main(): vec4 {
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("@group(0) @binding(0) var tex: texture_2d<f32>;");
+  });
+
+  it("emits texture() as textureSample", () => {
+    const code = compileToWGSL(`
+      @binding(0) uniform tex: sampler2D
+      fn main(): vec4 {
+        return texture(tex, vec2(0.5, 0.5))
+      }
+    `);
+    expect(code).toContain("textureSample(tex, sampler, vec2<f32>(0.5, 0.5))");
+  });
+
+  it("emits built-in math functions", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = abs(-1.0)
+        let y: f32 = sin(1.0)
+        let z: f32 = cos(1.0)
+        let p: f32 = pow(2.0, 3.0)
+        let r: f32 = sqrt(4.0)
+        let fl: f32 = floor(1.5)
+        let fr: f32 = fract(1.5)
+        let mn: f32 = min(1.0, 2.0)
+        let mx: f32 = max(1.0, 2.0)
+        let cl: f32 = clamp(0.5, 0.0, 1.0)
+        return vec4(x, y, z, 1.0)
+      }
+    `);
+    expect(code).toContain("abs((-1.0))");
+    expect(code).toContain("sin(1.0)");
+    expect(code).toContain("cos(1.0)");
+    expect(code).toContain("pow(2.0, 3.0)");
+    expect(code).toContain("sqrt(4.0)");
+    expect(code).toContain("floor(1.5)");
+    expect(code).toContain("fract(1.5)");
+    expect(code).toContain("min(1.0, 2.0)");
+    expect(code).toContain("max(1.0, 2.0)");
+    expect(code).toContain("clamp(0.5, 0.0, 1.0)");
+  });
+
+  it("emits deg and rad as degrees and radians", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = deg(1.0)
+        let y: f32 = rad(1.0)
+        return vec4(x, y, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("degrees(1.0)");
+    expect(code).toContain("radians(1.0)");
+  });
+
+  it("throws when main returns non-vec4", () => {
+    expect(() =>
+      compileToWGSL(`
+        fn main(): i32 {
+          return 42
+        }
+      `)
+    ).toThrow("main must return vec4");
+  });
+
+  it("throws when no main function", () => {
+    expect(() =>
+      compileToWGSL(`
+        fn helper(): vec4 {
+          return vec4(1.0, 0.0, 0.0, 1.0)
+        }
+      `)
+    ).toThrow("No main function found");
   });
 });

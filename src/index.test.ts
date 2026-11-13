@@ -18,15 +18,16 @@ describe("compile API", () => {
     expect(result.code).toContain("fragColor = vec4(1.0, 0.0, 0.0, 1.0);");
   });
 
-  it("throws for WGSL target (not yet implemented)", () => {
+  it("compiles valid shader to WGSL", () => {
     const result = compile({
-      source: "fn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }",
+      source: `fn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
       target: "wgsl",
-      file: "test.gl",
+      file: "test.wgsl",
     });
-    expect(result.code).toBeNull();
-    expect(result.diagnostics.length).toBeGreaterThan(0);
-    expect(result.diagnostics[0]!.message).toContain("WGSL backend not yet implemented");
+    expect(result.diagnostics).toEqual([]);
+    expect(result.code).toContain("@fragment");
+    expect(result.code).toContain("fn main() -> @location(0) vec4<f32>");
+    expect(result.code).toContain("return vec4<f32>(1.0, 0.0, 0.0, 1.0);");
   });
 
   it("throws for unknown target", () => {
