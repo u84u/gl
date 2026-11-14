@@ -1,5 +1,5 @@
 import { Diagnostic } from "../typechecker";
-import { IRModule, IRModuleItem, IRAnonymousStruct } from "../ir/shader-ir";
+import { IRModule, IRModuleItem, IRStructDecl } from "../ir/shader-ir";
 import {
   BackendCapabilities,
   ShaderTarget,
@@ -11,6 +11,9 @@ import {
   CodegenOptions,
   BackendOutput,
   ShaderArtifact,
+  ShaderResourceReflection,
+  ShaderUniformReflection,
+  ShaderInterfaceVariable,
   defaultRegistry,
 } from "./backend";
 import { validateGLSLModuleIR, generateGLSLFromIR, glslType } from "./glsl";
@@ -86,27 +89,56 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
           s.kind === "fn" && s.name === "main",
       );
       const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
-      const resources = module.items
-        .filter((s): s is Extract<IRModuleItem, { kind: "binding" }> => s.kind === "binding")
-        .map((b) => ({
+      const resources: ShaderResourceReflection[] = [];
+      const uniforms: ShaderUniformReflection[] = [];
+      let uniformOffset = 0;
+      for (const b of module.items) {
+        if (b.kind !== "binding") continue;
+        const isSampler = b.type.kind === "sampler";
+        resources.push({
           name: b.name,
-          kind: (b.type.kind === "sampler") ? "sampler" : "uniformBuffer",
+          kind: isSampler ? "sampler" : "uniformBuffer",
           binding: b.binding,
           set: 0,
           stageVisibility: [stage],
-        }));
+        });
+        if (!isSampler) {
+          const typeName = glslType(b.type);
+          const size = typeName === "float" || typeName === "int" || typeName === "uint" || typeName === "bool" ? 4 : 16;
+          uniforms.push({
+            name: b.name,
+            type: typeName,
+            offset: uniformOffset,
+            size,
+          });
+          uniformOffset += size;
+        }
+      }
       const inputs = mainStmt
         ? mainStmt.params.map((p) => ({ name: p.name, type: glslType(p.type) }))
         : [];
-      const outputs: { name: string; type: string }[] = [];
+      const outputs: ShaderInterfaceVariable[] = [];
       if (mainStmt && stage !== "compute") {
         const rt = mainStmt.returnType;
-        if (rt.kind === "anonymousStruct") {
-          for (const f of (rt as IRAnonymousStruct).fields) {
-            outputs.push({ name: f.name, type: glslType(f.type) });
+        if (stage === "fragment") {
+          if ((rt.kind === "vector") && rt.size === 4) {
+            outputs.push({ name: "fragColor", type: glslType(rt), location: 0 });
+          } else if (rt.kind === "struct") {
+            const structDecl = module.items.find(
+              (s): s is IRStructDecl => s.kind === "struct" && s.name === rt.name,
+            );
+            if (structDecl) {
+              for (let i = 0; i < structDecl.fields.length; i++) {
+                const field = structDecl.fields[i];
+                if (!field) continue;
+                outputs.push({ name: field.name, type: glslType(field.type), location: i });
+              }
+            }
           }
-        } else {
-          outputs.push({ name: "result", type: glslType(rt) });
+        } else if (stage === "vertex") {
+          if ((rt.kind === "vector") && rt.size === 4) {
+            outputs.push({ name: "gl_Position", type: glslType(rt), builtin: "position" });
+          }
         }
       }
       shaders.push({
@@ -116,7 +148,7 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
         reflection: {
           entryPoints: [{ name: "main", stage, inputs, outputs }],
           resources,
-          uniforms: [],
+          uniforms,
         },
       });
     }

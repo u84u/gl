@@ -1,5 +1,5 @@
 import type { Program } from "../types";
-import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock, IRAnonymousStruct } from "../ir/shader-ir";
+import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock } from "../ir/shader-ir";
 import { lowerProgram } from "../ir/lower";
 import { Diagnostic, diagnostic } from "../typechecker";
 import {
@@ -14,6 +14,9 @@ import {
   CodegenOptions,
   BackendOutput,
   ShaderArtifact,
+  ShaderResourceReflection,
+  ShaderUniformReflection,
+  ShaderInterfaceVariable,
   defaultRegistry,
 } from "./backend";
 
@@ -124,7 +127,7 @@ function wgslType(t: IRType): string {
   }
   if ((t.kind === "vector")) {
     const prefix = VEC_TYPE_MAP[t.element] || "vec";
-    return `${prefix}<${t.element}>`;
+    return `${prefix}${t.size}<${t.element}>`;
   }
   if ((t.kind === "struct")) return t.name;
   if ((t.kind === "sampler")) return "sampler";
@@ -1037,6 +1040,42 @@ export function validateWGSLModuleIR(
     }
   }
 
+  // Resource kind validation
+  for (const item of module.items) {
+    if (item.kind !== "binding") continue;
+    const span = spanOf(item);
+    if (item.type.kind === "sampler") {
+      if (!capabilities.resourceKinds.has("sampledTexture")) {
+        diagnostics.push(
+          diagnostic(file, span, `WGSL target does not support sampled texture bindings`, {
+            code: "WGSL_UNSUPPORTED_RESOURCE",
+            severity: "error",
+            help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
+          }),
+        );
+      }
+      if (!capabilities.resourceKinds.has("sampler")) {
+        diagnostics.push(
+          diagnostic(file, span, `WGSL target does not support sampler bindings`, {
+            code: "WGSL_UNSUPPORTED_RESOURCE",
+            severity: "error",
+            help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
+          }),
+        );
+      }
+    } else {
+      if (!capabilities.resourceKinds.has("uniformBuffer")) {
+        diagnostics.push(
+          diagnostic(file, span, `WGSL target does not support uniform buffer bindings`, {
+            code: "WGSL_UNSUPPORTED_RESOURCE",
+            severity: "error",
+            help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
+          }),
+        );
+      }
+    }
+  }
+
   for (const item of module.items) walkStmt(item);
   return diagnostics;
 }
@@ -1101,27 +1140,64 @@ export class WgslBackend implements ShaderCodegenBackend {
           s.kind === "fn" && s.name === "main",
       );
       const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
-      const resources = module.items
-        .filter((s): s is Extract<IRModuleItem, { kind: "binding" }> => s.kind === "binding")
-        .map((b) => ({
+      const resources: ShaderResourceReflection[] = [];
+      const uniforms: ShaderUniformReflection[] = [];
+      let uniformOffset = 0;
+      for (const b of module.items) {
+        if (b.kind !== "binding") continue;
+        const isSampler = b.type.kind === "sampler";
+        resources.push({
           name: b.name,
-          kind: (b.type.kind === "sampler" ? "sampler" : "uniformBuffer") as string,
+          kind: isSampler ? "sampledTexture" : "uniformBuffer",
           binding: b.binding,
           set: 0,
           stageVisibility: [stage],
-        }));
+        });
+        if (isSampler) {
+          resources.push({
+            name: `${b.name}_sampler`,
+            kind: "sampler",
+            binding: b.binding,
+            set: 0,
+            stageVisibility: [stage],
+          });
+        } else {
+          const typeName = wgslType(b.type);
+          const size = typeName === "f32" || typeName === "i32" || typeName === "u32" || typeName === "bool" ? 4 : 16;
+          uniforms.push({
+            name: b.name,
+            type: typeName,
+            offset: uniformOffset,
+            size,
+          });
+          uniformOffset += size;
+        }
+      }
       const inputs = mainStmt
         ? mainStmt.params.map((p) => ({ name: p.name, type: wgslType(p.type) }))
         : [];
-      const outputs: { name: string; type: string }[] = [];
+      const outputs: ShaderInterfaceVariable[] = [];
       if (mainStmt && stage !== "compute") {
         const rt = mainStmt.returnType;
-        if (rt.kind === "anonymousStruct") {
-          for (const f of (rt as IRAnonymousStruct).fields) {
-            outputs.push({ name: f.name, type: wgslType(f.type) });
+        if (stage === "fragment") {
+          if ((rt.kind === "vector") && rt.size === 4) {
+            outputs.push({ name: "", type: wgslType(rt), location: 0 });
+          } else if (rt.kind === "struct") {
+            const structDecl = module.items.find(
+              (s): s is Extract<IRModuleItem, { kind: "struct" }> => s.kind === "struct" && s.name === rt.name,
+            );
+            if (structDecl) {
+              for (let i = 0; i < structDecl.fields.length; i++) {
+                const field = structDecl.fields[i];
+                if (!field) continue;
+                outputs.push({ name: field.name, type: wgslType(field.type), location: i });
+              }
+            }
           }
-        } else {
-          outputs.push({ name: "result", type: wgslType(rt) });
+        } else if (stage === "vertex") {
+          if ((rt.kind === "vector") && rt.size === 4) {
+            outputs.push({ name: "gl_Position", type: wgslType(rt), builtin: "position" });
+          }
         }
       }
       shaders.push({
@@ -1131,7 +1207,7 @@ export class WgslBackend implements ShaderCodegenBackend {
         reflection: {
           entryPoints: [{ name: "main", stage, inputs, outputs }],
           resources,
-          uniforms: [],
+          uniforms,
         },
       } as ShaderArtifact);
     }

@@ -71,6 +71,21 @@ interface CompileResult {
 
 Each `ShaderArtifact` includes `stage`, `entryPoint`, `code`, and `reflection` (entry points, resources, uniforms).
 
+### Shader reflection
+
+`ShaderReflection` includes:
+- `entryPoints`: entry point name, stage, inputs (params with name/type), outputs (return values with name/type/location/builtin)
+- `resources`: every binding with `kind` ("sampler"/"uniformBuffer"/"sampledTexture"), `binding`, `set`, `stageVisibility`; synthesized sampler bindings for texture bindings are also included (WGSL)
+- `uniforms`: uniform buffer declarations with `name`, `type`, `offset`, `size`
+
+### Backend capability enforcement
+
+Backends reject unsupported features with structured diagnostics instead of silently narrowing types:
+- `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `WGSL_UNSUPPORTED_RESOURCE`
+- `GLSL_UNSUPPORTED_SCALAR`, `GLSL_UNSUPPORTED_STAGE`, `GLSL_UNSUPPORTED_RESOURCE`
+
+Validation checks shader stages, scalar types, and resource kinds against each backend's `BackendCapabilities`.
+
 ### Custom backends
 
 Backends register themselves in a `BackendRegistry`. Use `createDefaultBackendRegistry()` to copy the built-in registry, then `registry.register(backend)` or `registry.replace(backend)` to add or override targets. Pass your registry via `options.registry`.

@@ -191,7 +191,7 @@ describe("AST builder API", () => {
 
     const wgsl = compileAst(program, "wgsl");
     expect(wgsl).toContain("@group(0) @binding(0) var<uniform> time: f32;");
-    expect(wgsl).toContain("@group(0) @binding(1) var<uniform> color: vec<f32>;");
+    expect(wgsl).toContain("@group(0) @binding(1) var<uniform> color: vec4<f32>;");
   });
 
   it("compiles sampler textures", () => {

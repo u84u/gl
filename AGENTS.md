@@ -106,7 +106,21 @@ Backends implement `ShaderCodegenBackend` with `validate(module: IRModule, file)
 
 ## Diagnostics
 
-Structured `Diagnostic` type: `file`, `code?`, `severity?` ("error"\|"warning"\|"info"\|"hint"), `message`, `span` ({line, column, endLine?, endColumn?}), `related?`, `help?`. Use `diagnostic(file, span, message, options?)` helper. Backend validation diagnostics include stable codes like `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `GLSL_UNSUPPORTED_SCALAR`, `GLSL_ES_NO_DOUBLE`.
+Structured `Diagnostic` type: `file`, `code?`, `severity?` ("error"\|"warning"\|"info"\|"hint"), `message`, `span` ({line, column, endLine?, endColumn?}), `related?`, `help?`. Use `diagnostic(file, span, message, options?)` helper. ### Shader reflection
+
+Each `ShaderArtifact.reflection` contains:
+- `entryPoints`: entry point name, stage, inputs (params), outputs (return values with `location`/`builtin`)
+- `resources`: every binding declaration, with `kind` ("sampler" or "uniformBuffer"), `binding`, `set`, `stageVisibility`; synthesized sampler bindings for texture bindings are also included (WGSL)
+- `uniforms`: uniform buffer declarations with `name`, `type`, `offset`, `size`
+
+Backend capability diagnostics use stable codes:
+- `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `WGSL_UNSUPPORTED_RESOURCE`
+- `GLSL_UNSUPPORTED_SCALAR`, `GLSL_UNSUPPORTED_STAGE`, `GLSL_UNSUPPORTED_RESOURCE`
+
+Backend capability enforcement validates:
+- Shader stages against `capabilities.shaderStages`
+- Scalar types against `capabilities.scalarTypes`
+- Resource kinds (sampledTexture, sampler, uniformBuffer) against `capabilities.resourceKinds`
 
 ## Adding a language feature
 

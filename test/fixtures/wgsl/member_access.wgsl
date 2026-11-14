@@ -2,7 +2,7 @@
 
 @fragment
 fn main() -> @location(0) vec4<f32> {
-  let v: vec<f32> = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+  let v: vec4<f32> = vec4<f32>(1.0, 0.0, 0.0, 1.0);
   let s: f32 = v.r;
   return vec4<f32>(v.x, s, 0.0, 1.0);
 }

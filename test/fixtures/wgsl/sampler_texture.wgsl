@@ -5,7 +5,7 @@
 
 @fragment
 fn main() -> @location(0) vec4<f32> {
-  let uv: vec<f32> = vec2<f32>(0.5, 0.5);
-  let col: vec<f32> = textureSample(tex, tex_sampler, uv);
+  let uv: vec2<f32> = vec2<f32>(0.5, 0.5);
+  let col: vec4<f32> = textureSample(tex, tex_sampler, uv);
   return col;
 }

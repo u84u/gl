@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { compile, compileAsync } from "../src/index";
 import { NodeFileSourceResolver } from "../src/node/resolver";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -455,6 +455,71 @@ describe("compile API", () => {
       });
       expect(result.diagnostics).toEqual([]);
       expect(result.code).toBeTruthy();
+    });
+  });
+
+  describe("resolver path containment", () => {
+    it("allows valid nested imports within root", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
+      try {
+        mkdirSync(join(dir, "sub"), { recursive: true });
+        writeFileSync(join(dir, "sub", "types.gl"), `struct Color { f32 r, f32 g, f32 b, f32 a }`);
+        writeFileSync(
+          join(dir, "main.gl"),
+          `import "./sub/types.gl"\nfn main(): vec4 { let c: Color = { .r = 1.0 }; return vec4(c.r, 0.0, 0.0, 1.0) }`
+        );
+        const resolver = new NodeFileSourceResolver(dir);
+        const result = await compileAsync({
+          source: `import "./sub/types.gl"\nfn main(): vec4 { let c: Color = { .r = 1.0, .g = 0.5, .b = 0.25, .a = 1.0 }; return vec4(c.r, c.g, c.b, c.a) }`,
+          target: "glsl",
+          sourceId: join(dir, "main.gl"),
+          file: join(dir, "main.gl"),
+          resolver,
+        });
+        expect(result.diagnostics).toEqual([]);
+        expect(result.code).toContain("struct Color {");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects imports outside root via ..", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
+      const outsideDir = mkdtempSync(join(tmpdir(), "gl-outside-"));
+      try {
+        writeFileSync(join(outsideDir, "secret.gl"), `struct Secret { f32 x }`);
+        const resolver = new NodeFileSourceResolver(dir);
+        const result = await compileAsync({
+          source: `import "../gl-outside/secret.gl"\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+          target: "glsl",
+          sourceId: join(dir, "main.gl"),
+          file: join(dir, "main.gl"),
+          resolver,
+        });
+        expect(result.code).toBeNull();
+        expect(result.diagnostics.length).toBeGreaterThan(0);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects imports to absolute paths outside root", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
+      try {
+        const resolver = new NodeFileSourceResolver(dir);
+        const result = await compileAsync({
+          source: `import "/etc/passwd"\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+          target: "glsl",
+          sourceId: join(dir, "main.gl"),
+          file: join(dir, "main.gl"),
+          resolver,
+        });
+        expect(result.code).toBeNull();
+        expect(result.diagnostics.length).toBeGreaterThan(0);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

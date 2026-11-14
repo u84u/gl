@@ -1,5 +1,5 @@
 import type { Program } from "../types";
-import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock, IRStructDecl, IRAnonymousStruct } from "../ir/shader-ir";
+import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock, IRStructDecl } from "../ir/shader-ir";
 import { lowerProgram } from "../ir/lower";
 import { Diagnostic, diagnostic } from "../typechecker";
 import {
@@ -14,6 +14,9 @@ import {
   CodegenOptions,
   BackendOutput,
   ShaderArtifact,
+  ShaderResourceReflection,
+  ShaderUniformReflection,
+  ShaderInterfaceVariable,
   defaultRegistry,
 } from "./backend";
 
@@ -93,6 +96,9 @@ export function glslType(t: IRType): string {
     }
     return `${prefix}mat${t.columns}x${t.rows}`;
   }
+  if ((t.kind === "array")) {
+    return `${glslType(t.element)}[${t.size}]`;
+  }
   if (t.kind === "opaque") return t.name;
   if (t.kind === "anonymousStruct") {
     // Anonymous structs must be lifted to named structs for GLSL
@@ -118,16 +124,15 @@ export function generateGLSLFromIR(module: IRModule, target?: "glsl-450" | "glsl
     (s): s is Extract<IRModuleItem, { kind: "fn" }> => s.kind === "fn" && s.name === "main"
   );
 
+  let stage: ShaderStage = "fragment";
   let anythingEmitted = false;
   for (let i = 0; i < module.items.length; i++) {
     const stmt = module.items[i];
     if (!stmt) continue;
     if (i === mainIndex) continue;
-    emitStatement(lines, stmt, 0);
+    emitStatement(lines, stmt, 0, stage);
     anythingEmitted = true;
   }
-
-  let stage: ShaderStage = "fragment";
 
   if (mainIndex !== -1) {
     const mainFnStmt = module.items[mainIndex];
@@ -153,7 +158,7 @@ export function generateGLSLFromIR(module: IRModule, target?: "glsl-450" | "glsl
         lines.push("");
         lines.push("void main() {");
         for (const s of mainFn.body.statements) {
-          emitStatement(lines, s, 1, { structName: "", fields: [] });
+          emitStatement(lines, s, 1, stage, { structName: "", fields: [] });
         }
         lines.push("}");
       } else if ((returnType.kind === "struct")) {
@@ -173,7 +178,7 @@ export function generateGLSLFromIR(module: IRModule, target?: "glsl-450" | "glsl
         lines.push("void main() {");
         const outputInfo = { structName: returnType.name, fields: structDecl.fields };
         for (const s of mainFn.body.statements) {
-          emitStatement(lines, s, 1, outputInfo);
+          emitStatement(lines, s, 1, stage, outputInfo);
         }
         lines.push("}");
       } else {
@@ -185,7 +190,7 @@ export function generateGLSLFromIR(module: IRModule, target?: "glsl-450" | "glsl
         lines.push("");
         lines.push("void main() {");
         for (const s of mainFn.body.statements) {
-          emitStatement(lines, s, 1, { structName: "", fields: [] });
+          emitStatement(lines, s, 1, stage, { structName: "", fields: [] });
         }
         lines.push("}");
       } else {
@@ -196,7 +201,7 @@ export function generateGLSLFromIR(module: IRModule, target?: "glsl-450" | "glsl
       lines.push("");
       lines.push("void main() {");
       for (const s of mainFn.body.statements) {
-        emitStatement(lines, s, 1, { structName: "", fields: [] });
+        emitStatement(lines, s, 1, stage, { structName: "", fields: [] });
       }
       lines.push("}");
     } else {
@@ -224,12 +229,14 @@ export function generateGLSL(program: Program, target?: "glsl-450" | "glsl-es-30
  * @param lines - The output lines array to append to.
  * @param stmt - The statement to emit.
  * @param indent - The indentation level (number of 2-space indent units).
+ * @param stage - The shader stage ("fragment", "vertex", "compute").
  * @param outputInfo - Optional output struct info for main function returns.
  */
 function emitStatement(
   lines: string[],
   stmt: IRStatement | IRModuleItem,
   indent: number,
+  stage: ShaderStage,
   outputInfo: { structName: string; fields: { name: string; type: IRType }[] } | null = null,
 ): void {
   const pad = "  ".repeat(indent);
@@ -271,7 +278,7 @@ function emitStatement(
       .join(", ");
     lines.push(`${pad}${glslType(stmt.returnType)} ${stmt.name}(${params}) {`);
     for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, null);
+      emitStatement(lines, s, indent + 1, stage, null);
     }
     lines.push(`${pad}}`);
     return;
@@ -315,11 +322,20 @@ function emitStatement(
           lines.push(`${pad}${field.name} = outVal.${field.name};`);
         }
       } else {
-        if ((stmt.value.kind === "structLiteral")) {
-          const args = stmt.value.fields.map((f) => emitExpression(f.value)).join(", ");
-          lines.push(`${pad}fragColor = vec4(${args});`);
+        if (stage === "vertex") {
+          if ((stmt.value.kind === "structLiteral")) {
+            const args = stmt.value.fields.map((f) => emitExpression(f.value)).join(", ");
+            lines.push(`${pad}gl_Position = vec4(${args});`);
+          } else {
+            lines.push(`${pad}gl_Position = ${emitExpression(stmt.value)};`);
+          }
         } else {
-          lines.push(`${pad}fragColor = ${emitExpression(stmt.value)};`);
+          if ((stmt.value.kind === "structLiteral")) {
+            const args = stmt.value.fields.map((f) => emitExpression(f.value)).join(", ");
+            lines.push(`${pad}fragColor = vec4(${args});`);
+          } else {
+            lines.push(`${pad}fragColor = ${emitExpression(stmt.value)};`);
+          }
         }
       }
     } else {
@@ -334,7 +350,7 @@ function emitStatement(
   if ((stmt.kind === "block")) {
     lines.push(`${pad}{`);
     for (const s of stmt.statements) {
-      emitStatement(lines, s, indent + 1, outputInfo);
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
     }
     lines.push(`${pad}}`);
     return;
@@ -342,13 +358,13 @@ function emitStatement(
   if ((stmt.kind === "if")) {
     lines.push(`${pad}if (${emitExpression(stmt.condition)}) {`);
     for (const s of stmt.thenBranch.statements) {
-      emitStatement(lines, s, indent + 1, outputInfo);
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
     }
     lines.push(`${pad}}`);
     if (stmt.elseBranch) {
       lines.push(`${pad}else {`);
       for (const s of stmt.elseBranch.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
+        emitStatement(lines, s, indent + 1, stage, outputInfo);
       }
       lines.push(`${pad}}`);
     }
@@ -357,7 +373,7 @@ function emitStatement(
   if ((stmt.kind === "while")) {
     lines.push(`${pad}while (${emitExpression(stmt.condition)}) {`);
     for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, outputInfo);
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
     }
     lines.push(`${pad}}`);
     return;
@@ -370,7 +386,7 @@ function emitStatement(
       // Loop variable is implicitly an int
       lines.push(`${pad}for (int __loop_var = ${startCode}; __loop_var ${condOp} ${endCode}; __loop_var++) {`);
       for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 1, outputInfo);
+        emitStatement(lines, s, indent + 1, stage, outputInfo);
       }
       lines.push(`${pad}}`);
       return;
@@ -387,7 +403,7 @@ function emitStatement(
     let incrStr = stmt.increment ? emitExpression(stmt.increment) : "";
     lines.push(`${pad}for (${initStr}; ${condStr}; ${incrStr}) {`);
     for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, outputInfo);
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
     }
     lines.push(`${pad}}`);
     return;
@@ -395,7 +411,7 @@ function emitStatement(
   if ((stmt.kind === "doWhile")) {
     lines.push(`${pad}do {`);
     for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, outputInfo);
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
     }
     lines.push(`${pad}} while (${emitExpression(stmt.condition)});`);
     return;
@@ -403,7 +419,7 @@ function emitStatement(
   if ((stmt.kind === "loop")) {
     lines.push(`${pad}for (;;) {`);
     for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, outputInfo);
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
     }
     lines.push(`${pad}}`);
     return;
@@ -928,6 +944,42 @@ export function validateGLSLModuleIR(
     }
   }
 
+  // Resource kind validation
+  for (const item of module.items) {
+    if (item.kind !== "binding") continue;
+    const span = spanOf(item);
+    if (item.type.kind === "sampler") {
+      if (!capabilities.resourceKinds.has("sampledTexture")) {
+        diagnostics.push(
+          diagnostic(file, span, `GLSL target does not support sampled texture bindings`, {
+            code: "GLSL_UNSUPPORTED_RESOURCE",
+            severity: "error",
+            help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
+          }),
+        );
+      }
+      if (!capabilities.resourceKinds.has("sampler")) {
+        diagnostics.push(
+          diagnostic(file, span, `GLSL target does not support sampler bindings`, {
+            code: "GLSL_UNSUPPORTED_RESOURCE",
+            severity: "error",
+            help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
+          }),
+        );
+      }
+    } else {
+      if (!capabilities.resourceKinds.has("uniformBuffer")) {
+        diagnostics.push(
+          diagnostic(file, span, `GLSL target does not support uniform buffer bindings`, {
+            code: "GLSL_UNSUPPORTED_RESOURCE",
+            severity: "error",
+            help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
+          }),
+        );
+      }
+    }
+  }
+
   for (const item of module.items) walkStmt(item);
   return diagnostics;
 }
@@ -993,27 +1045,56 @@ export class GlslBackend implements ShaderCodegenBackend {
           s.kind === "fn" && s.name === "main",
       );
       const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
-      const resources = module.items
-        .filter((s): s is Extract<IRModuleItem, { kind: "binding" }> => s.kind === "binding")
-        .map((b) => ({
+      const resources: ShaderResourceReflection[] = [];
+      const uniforms: ShaderUniformReflection[] = [];
+      let uniformOffset = 0;
+      for (const b of module.items) {
+        if (b.kind !== "binding") continue;
+        const isSampler = b.type.kind === "sampler";
+        resources.push({
           name: b.name,
-          kind: (b.type.kind === "sampler") ? "sampler" : "uniformBuffer",
+          kind: isSampler ? "sampler" : "uniformBuffer",
           binding: b.binding,
           set: 0,
           stageVisibility: [stage],
-        }));
+        });
+        if (!isSampler) {
+          const typeName = glslType(b.type);
+          const size = typeName === "float" || typeName === "int" || typeName === "uint" || typeName === "bool" ? 4 : 16;
+          uniforms.push({
+            name: b.name,
+            type: typeName,
+            offset: uniformOffset,
+            size,
+          });
+          uniformOffset += size;
+        }
+      }
       const inputs = mainStmt
         ? mainStmt.params.map((p) => ({ name: p.name, type: glslType(p.type) }))
         : [];
-      const outputs: { name: string; type: string }[] = [];
+      const outputs: ShaderInterfaceVariable[] = [];
       if (mainStmt && stage !== "compute") {
         const rt = mainStmt.returnType;
-        if (rt.kind === "anonymousStruct") {
-          for (const f of (rt as IRAnonymousStruct).fields) {
-            outputs.push({ name: f.name, type: glslType(f.type) });
+        if (stage === "fragment") {
+          if ((rt.kind === "vector") && rt.size === 4) {
+            outputs.push({ name: "fragColor", type: glslType(rt), location: 0 });
+          } else if (rt.kind === "struct") {
+            const structDecl = module.items.find(
+              (s): s is IRStructDecl => s.kind === "struct" && s.name === rt.name,
+            );
+            if (structDecl) {
+              for (let i = 0; i < structDecl.fields.length; i++) {
+                const field = structDecl.fields[i];
+                if (!field) continue;
+                outputs.push({ name: field.name, type: glslType(field.type), location: i });
+              }
+            }
           }
-        } else {
-          outputs.push({ name: "result", type: glslType(rt) });
+        } else if (stage === "vertex") {
+          if ((rt.kind === "vector") && rt.size === 4) {
+            outputs.push({ name: "gl_Position", type: glslType(rt), builtin: "position" });
+          }
         }
       }
       shaders.push({
@@ -1023,7 +1104,7 @@ export class GlslBackend implements ShaderCodegenBackend {
         reflection: {
           entryPoints: [{ name: "main", stage, inputs, outputs }],
           resources,
-          uniforms: [],
+          uniforms,
         },
       });
     }
