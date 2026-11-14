@@ -4,7 +4,7 @@
 out vec4 fragColor;
 
 void main() {
-  float x = deg(1.0);
-  float y = rad(1.0);
+  float x = degrees(1.0);
+  float y = radians(1.0);
   fragColor = vec4(x, y, 0.0, 1.0);
 }

@@ -3,13 +3,15 @@
 @fragment
 fn main() -> @location(0) vec4<f32> {
   var i: i32 = 0;
-  var x = 0;
-  loop {
-    if (!(x < 3)) {
-      break;
+  {
+    var x = 0;
+    loop {
+      if (!(x < 3)) {
+        break;
+      }
+      i = i + 1;
+      x = x + 1;
     }
-      (i = i + 1);
-    x = x + 1;
   }
   return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }

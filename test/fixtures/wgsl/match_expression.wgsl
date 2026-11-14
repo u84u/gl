@@ -3,7 +3,7 @@
 @fragment
 fn main() -> @location(0) vec4<f32> {
   let x: i32 = 1;
-  let result: f32;
+  var result: f32;
   if ((x == 1)) {
     result = 10.0;
   }

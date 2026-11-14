@@ -606,7 +606,7 @@ describe("codegen/glsl", () => {
       }
     `));
     const code = generateGLSL(program);
-    expect(code).toContain("uint x = 0xFF0000;");
+    expect(code).toContain("uint x = 0xFF0000u;");
   });
 
   it("throws when main returns unknown struct type", () => {
@@ -748,7 +748,7 @@ describe("codegen/glsl", () => {
       }
     `));
     const code = generateGLSL(program);
-    expect(code).toContain("deg(1.0)");
+    expect(code).toContain("degrees(1.0)");
   });
 
   it("emits rad built-in", () => {
@@ -759,7 +759,7 @@ describe("codegen/glsl", () => {
       }
     `));
     const code = generateGLSL(program);
-    expect(code).toContain("rad(1.0)");
+    expect(code).toContain("radians(1.0)");
   });
 
   it("emits array literal", () => {
@@ -888,7 +888,59 @@ describe("codegen/glsl", () => {
         return vec4(1.0, 0.0, 0.0, 1.0)
       }
     `);
-    expect(code).toContain("(1 <=> 2)");
+    expect(code).toContain("((1 < 2) ? -1 : ((1 > 2) ? 1 : 0))");
+    expect(code).not.toContain("<=>");
+  });
+
+  it("emits a range-for index that is valid in GLSL ES", () => {
+    const code = compileToGLSL(`
+      fn main(): vec4 {
+        let mut i: i32 = 0
+        for x in 0..3 {
+          i += 1
+        }
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("for (int loopIndex = 0; loopIndex < 3; loopIndex++) {");
+    expect(code).not.toContain("__loop_var");
+  });
+
+  it("emits match as statement if-else chain", () => {
+    const code = compileToGLSL(`
+      fn main(): vec4 {
+        let x: i32 = 1
+        match x {
+          1 => { return vec4(1.0, 0.0, 0.0, 1.0) }
+          2 => { return vec4(0.0, 1.0, 0.0, 1.0) }
+          _ => { return vec4(0.0, 0.0, 1.0, 1.0) }
+        }
+        return vec4(0.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("if ((x == 1)) {");
+    expect(code).toContain("else if ((x == 2)) {");
+    expect(code).toContain("else {");
+    expect(code).not.toContain("(if");
+  });
+
+  it("emits match as conditional assignments", () => {
+    const code = compileToGLSL(`
+      fn main(): vec4 {
+        let x: i32 = 1
+        let result: f32 = match x {
+          1 => { 10.0 }
+          2 => { 20.0 }
+          _ => { 0.0 }
+        }
+        return vec4(result, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("float result;");
+    expect(code).toContain("result = 10.0;");
+    expect(code).toContain("result = 20.0;");
+    expect(code).toContain("result = 0.0;");
+    expect(code).not.toContain("= (if");
   });
 
   // Phase 5: Ternary conditional
@@ -1155,7 +1207,8 @@ describe("codegen/wgsl", () => {
       }
     `);
     expect(code).toContain("while (i < 5) {");
-    expect(code).toContain("(i = i + 1)");
+    expect(code).toContain("i = i + 1;");
+    expect(code).not.toContain("(i = i + 1)");
   });
 
   it("emits loop, break and continue", () => {
@@ -1286,7 +1339,7 @@ describe("codegen/wgsl", () => {
     expect(code).toContain("// enum Color (Red, Green, Blue)");
   });
 
-  it("emits match as statement if-else chain", () => {
+  it("emits match as WGSL statement if-else chain", () => {
     const code = compileToWGSL(`
       fn main(): vec4 {
         let x: i32 = 1
@@ -1303,7 +1356,7 @@ describe("codegen/wgsl", () => {
     expect(code).toContain("else {");
   });
 
-  it("emits match as expression value with temp variable", () => {
+  it("emits match as WGSL expression value with temp variable", () => {
     const code = compileToWGSL(`
       fn main(): vec4 {
         let x: i32 = 1
@@ -1315,7 +1368,7 @@ describe("codegen/wgsl", () => {
         return vec4(result, 0.0, 0.0, 1.0)
       }
     `);
-    expect(code).toContain("let result: f32;");
+    expect(code).toContain("var result: f32;");
     expect(code).toContain("result = 10.0;");
     expect(code).toContain("result = 20.0;");
     expect(code).toContain("result = 0.0;");
@@ -1350,6 +1403,65 @@ describe("codegen/wgsl", () => {
     expect(code).toContain("if (!(x <= 2)) {");
   });
 
+  it("emits compound assignment as a statement", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let mut x: f32 = 1.0
+        x += 2.0
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("x = x + 2.0;");
+    expect(code).not.toContain("(x = x + 2.0);");
+  });
+
+  it("emits update expressions as statements", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let mut x: i32 = 1
+        ++x
+        x--
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("x = x + 1;");
+    expect(code).toContain("x = x - 1;");
+  });
+
+  it("emits value-only expression statements as phony assignments", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let x: f32 = 1.0
+        x
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("_ = x;");
+  });
+
+  it("emits ternary conditional as select", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let b: bool = true
+        let x: f32 = b ? 1.0 : 2.0
+        return vec4(x, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("select(2.0, 1.0, b)");
+    expect(code).not.toContain("?");
+  });
+
+  it("emits spaceship as a select chain", () => {
+    const code = compileToWGSL(`
+      fn main(): vec4 {
+        let a: i32 = 1 <=> 2
+        return vec4(1.0, 0.0, 0.0, 1.0)
+      }
+    `);
+    expect(code).toContain("select(select(i32(0), i32(1), (1 > 2)), i32(-1), (1 < 2))");
+    expect(code).not.toContain("<=>");
+  });
+
   it("emits array literal with element type", () => {
     const code = compileToWGSL(`
       fn main(): vec4 {
@@ -1358,7 +1470,7 @@ describe("codegen/wgsl", () => {
       }
     `);
     expect(code).toContain("array<f32, 3>");
-    expect(code).toContain("array<f32>(1.0, 2.0, 3.0)");
+    expect(code).toContain("array<f32, 3>(1.0, 2.0, 3.0)");
   });
 
   it("emits struct return with location attributes", () => {
@@ -1424,7 +1536,8 @@ describe("codegen/wgsl", () => {
           return vec4(1.0, 0.0, 0.0, 1.0)
         }
       `);
-      expect(code).toContain("let v: ivec3<i32>");
+      expect(code).toContain("let v: vec3<i32> = vec3<i32>(1, 2, 3)");
+      expect(code).not.toContain("ivec3");
     });
 
     it("emits vec2<u32> type annotation", () => {
@@ -1434,7 +1547,58 @@ describe("codegen/wgsl", () => {
           return vec4(1.0, 0.0, 0.0, 1.0)
         }
       `);
-      expect(code).toContain("let v: uvec2<u32>");
+      expect(code).toContain("let v: vec2<u32> = vec2<u32>(1, 2)");
+      expect(code).not.toContain("uvec2");
+    });
+
+    it("emits vec2<bool> for bvec2", () => {
+      const code = compileToWGSL(`
+        fn main(): vec4 {
+          let v: bvec2 = bvec2(true, false)
+          return vec4(1.0, 0.0, 0.0, 1.0)
+        }
+      `);
+      expect(code).toContain("let v: vec2<bool> = vec2<bool>(true, false)");
+      expect(code).not.toContain("bvec2");
+    });
+
+    it("emits enable f16 when the shader uses f16", () => {
+      const code = compileToWGSL(`
+        fn main(): vec4 {
+          let x: f16 = 1.0
+          return vec4(1.0, 0.0, 0.0, 1.0)
+        }
+      `);
+      expect(code).toContain("enable f16;");
+      expect(code).toContain("let x: f16");
+    });
+
+    it("does not emit enable f16 without f16 usage", () => {
+      const code = compileToWGSL(`fn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`);
+      expect(code).not.toContain("enable f16;");
+    });
+
+    it.each(["i8", "u8", "i16", "u16", "i64", "u64", "bf16"])(
+      "rejects unsupported WGSL scalar %s instead of narrowing it",
+      (scalar) => {
+        const result = compile({
+          source: `fn main(): vec4 { let x: ${scalar} = 1; return vec4(1.0, 0.0, 0.0, 1.0) }`,
+          target: "wgsl",
+          file: "test.wgsl",
+        });
+        expect(result.code).toBeNull();
+        expect(result.diagnostics.some((d) => d.code === "WGSL_UNSUPPORTED_SCALAR")).toBe(true);
+      },
+    );
+
+    it("rejects non-float WGSL matrix element types", () => {
+      const result = compile({
+        source: `fn main(): vec4 { let x: imat2; return vec4(1.0, 0.0, 0.0, 1.0) }`,
+        target: "wgsl",
+        file: "test.wgsl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.some((d) => d.code === "WGSL_UNSUPPORTED_MATRIX")).toBe(true);
     });
   });
 
@@ -1446,7 +1610,8 @@ describe("codegen/wgsl", () => {
         file: "test.gl",
       });
       expect(result.diagnostics).toEqual([]);
-      expect(result.code).toContain("out vec4 gl_Position;");
+      expect(result.code).not.toContain("out vec4 gl_Position;");
+      expect(result.code).toContain("void main() {");
       expect(result.code).toContain("gl_Position = vec4(0.0, 0.0, 0.0, 1.0);");
       expect(result.code).not.toContain("fragColor");
     });
@@ -1543,9 +1708,22 @@ describe("codegen/wgsl", () => {
       expect(timeUniform).toBeDefined();
       expect(timeUniform!.type).toBe("float");
       expect(timeUniform!.offset).toBe(0);
+      expect(timeUniform!.size).toBe(4);
       const colorUniform = shader.reflection.uniforms.find((u) => u.name === "color");
       expect(colorUniform).toBeDefined();
       expect(colorUniform!.type).toBe("vec4");
+      expect(colorUniform!.size).toBe(16);
+    });
+
+    it("does not classify standalone GLSL uniforms as uniform buffers", () => {
+      const result = compile({
+        source: `@binding(0) uniform time: f32\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+        target: "glsl-450",
+        file: "test.gl",
+      });
+      expect(result.diagnostics).toEqual([]);
+      const kinds = result.shaders[0]!.reflection.resources.map((r) => r.kind);
+      expect(kinds).toEqual(["uniform"]);
     });
 
     it("WGSL reflection includes texture and sampler resources", () => {
@@ -1562,6 +1740,36 @@ describe("codegen/wgsl", () => {
       const samplerRes = shader.reflection.resources.find((r) => r.name === "tex_sampler");
       expect(samplerRes).toBeDefined();
       expect(samplerRes!.kind).toBe("sampler");
+    });
+
+    it("WGSL reflection reports synthesized sampler's actual binding", () => {
+      const result = compile({
+        source: `@binding(0) uniform tex: sampler2D\n@binding(1) uniform time: f32\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+        target: "wgsl",
+        file: "test.wgsl",
+      });
+      expect(result.diagnostics).toEqual([]);
+      const shader = result.shaders[0]!;
+      const samplerRes = shader.reflection.resources.find((r) => r.name === "tex_sampler");
+      expect(samplerRes).toBeDefined();
+      expect(samplerRes!.binding).toBe(2);
+      expect(result.code).toContain("@binding(2) var tex_sampler: sampler;");
+      const uniformRes = shader.reflection.resources.find((r) => r.name === "time");
+      expect(uniformRes!.kind).toBe("uniformBuffer");
+      expect(shader.reflection.uniforms.find((u) => u.name === "time")!.size).toBe(4);
+    });
+
+    it("WGSL reflection sizes vectors and arrays by their uniform layout", () => {
+      const result = compile({
+        source: `@binding(0) uniform color: vec4\n@binding(1) uniform dirs: vec3\n@binding(2) uniform weights: [f32; 4]\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+        target: "wgsl",
+        file: "test.wgsl",
+      });
+      expect(result.diagnostics).toEqual([]);
+      const uniforms = result.shaders[0]!.reflection.uniforms;
+      expect(uniforms.find((u) => u.name === "color")!.size).toBe(16);
+      expect(uniforms.find((u) => u.name === "dirs")!.size).toBe(12);
+      expect(uniforms.find((u) => u.name === "weights")!.size).toBe(16);
     });
 
     it("WGSL reflection includes location output", () => {

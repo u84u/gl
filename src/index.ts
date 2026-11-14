@@ -137,7 +137,7 @@ function compileProgram(
   const shaders: ShaderArtifact[] = [];
   if (!hasErrors) {
     try {
-      const ir = lowerProgram(ast, file);
+      const ir = lowerProgram(ast, file, provenance);
 
       const backend = registry.get(target);
       if (!backend) {

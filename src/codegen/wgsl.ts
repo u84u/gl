@@ -1,5 +1,5 @@
 import type { Program } from "../types";
-import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock } from "../ir/shader-ir";
+import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock, IRStructDecl, IRScalarName } from "../ir/shader-ir";
 import { lowerProgram } from "../ir/lower";
 import { Diagnostic, diagnostic } from "../typechecker";
 import {
@@ -21,10 +21,6 @@ import {
 } from "./backend";
 
 const SCALAR_MAP: Record<string, string> = {
-  i8: "i32",
-  u8: "u32",
-  i16: "i32",
-  u16: "u32",
   i32: "i32",
   u32: "u32",
   f16: "f16",
@@ -32,39 +28,20 @@ const SCALAR_MAP: Record<string, string> = {
   bool: "bool",
 };
 
-const VEC_TYPE_MAP: Record<string, string> = {
-  f32: "vec",
-  f16: "vec",
-  f64: "vec",
-  bf16: "vec",
-  i32: "ivec",
-  i8: "ivec",
-  i16: "ivec",
-  i64: "ivec",
-  u32: "uvec",
-  u8: "uvec",
-  u16: "uvec",
-  u64: "uvec",
-  bool: "bvec",
-};
-
-// WGSL constructor names carry an explicit element type parameter.
+// WGSL has a single vector family; the element type is a type parameter.
 const CONSTRUCTOR_TYPE_MAP: Record<string, string> = {
   vec2: "vec2<f32>",
   vec3: "vec3<f32>",
   vec4: "vec4<f32>",
-  ivec2: "ivec2<i32>",
-  ivec3: "ivec3<i32>",
-  ivec4: "ivec4<i32>",
-  uvec2: "uvec2<u32>",
-  uvec3: "uvec3<u32>",
-  uvec4: "uvec4<u32>",
-  bvec2: "bvec2<bool>",
-  bvec3: "bvec3<bool>",
-  bvec4: "bvec4<bool>",
-  dvec2: "vec2<f64>",
-  dvec3: "vec3<f64>",
-  dvec4: "vec4<f64>",
+  ivec2: "vec2<i32>",
+  ivec3: "vec3<i32>",
+  ivec4: "vec4<i32>",
+  uvec2: "vec2<u32>",
+  uvec3: "vec3<u32>",
+  uvec4: "vec4<u32>",
+  bvec2: "vec2<bool>",
+  bvec3: "vec3<bool>",
+  bvec4: "vec4<bool>",
   mat2: "mat2x2<f32>",
   mat3: "mat3x3<f32>",
   mat4: "mat4x4<f32>",
@@ -75,22 +52,6 @@ const CONSTRUCTOR_TYPE_MAP: Record<string, string> = {
 const WGSL_BUILTIN_NAME_MAP: Record<string, string> = {
   deg: "degrees",
   rad: "radians",
-};
-
-const MAT_PREFIX_MAP: Record<string, string> = {
-  f32: "",
-  f64: "d",
-  i32: "i",
-  u32: "u",
-  f16: "",
-  bf16: "",
-  i8: "i",
-  u8: "u",
-  i16: "i",
-  u16: "i",
-  i64: "i",
-  u64: "u",
-  bool: "b",
 };
 
 /**
@@ -113,6 +74,170 @@ function samplerTextureType(name: string): string {
   return map[name] ?? "texture_2d<f32>";
 }
 
+/* ------------------------------------------------------------------ */
+/* f16 feature detection                                              */
+/* ------------------------------------------------------------------ */
+
+function irTypeUsesF16(t: IRType): boolean {
+  switch (t.kind) {
+    case "scalar":
+      return t.name === "f16";
+    case "vector":
+    case "matrix":
+      return t.element === "f16";
+    case "array":
+      return irTypeUsesF16(t.element);
+    case "anonymousStruct":
+      return t.fields.some((f) => irTypeUsesF16(f.type));
+    case "union":
+      return t.members.some(irTypeUsesF16);
+    case "option":
+      return irTypeUsesF16(t.element);
+    case "result":
+      return irTypeUsesF16(t.ok) || irTypeUsesF16(t.err);
+    case "tuple":
+      return t.elements.some(irTypeUsesF16);
+    default:
+      return false;
+  }
+}
+
+function blockUsesF16(block: IRBlock): boolean {
+  return block.statements.some(stmtUsesF16);
+}
+
+function stmtUsesF16(stmt: IRModuleItem): boolean {
+  switch (stmt.kind) {
+    case "varDecl":
+      return irTypeUsesF16(stmt.type);
+    case "fn":
+      return (
+        stmt.params.some((p) => irTypeUsesF16(p.type)) ||
+        irTypeUsesF16(stmt.returnType) ||
+        blockUsesF16(stmt.body)
+      );
+    case "struct":
+      return stmt.fields.some((f) => irTypeUsesF16(f.type));
+    case "binding":
+      return irTypeUsesF16(stmt.type);
+    case "enum":
+      return stmt.variants.some((v) => v.type !== null && irTypeUsesF16(v.type));
+    case "typeAlias":
+      return irTypeUsesF16(stmt.type);
+    case "newtype":
+      return irTypeUsesF16(stmt.innerType);
+    case "trait":
+      return stmt.methods.some(
+        (m) => m.params.some((p) => irTypeUsesF16(p.type)) || irTypeUsesF16(m.returnType),
+      );
+    case "implBlock":
+      return irTypeUsesF16(stmt.type) || stmt.methods.some(stmtUsesF16);
+    case "if":
+      return blockUsesF16(stmt.thenBranch) || (stmt.elseBranch ? blockUsesF16(stmt.elseBranch) : false);
+    case "while":
+    case "for":
+    case "doWhile":
+    case "loop":
+      return blockUsesF16(stmt.body);
+    case "block":
+      return blockUsesF16(stmt);
+    default:
+      return false;
+  }
+}
+
+function moduleUsesF16(module: IRModule): boolean {
+  return module.items.some(stmtUsesF16);
+}
+
+/* ------------------------------------------------------------------ */
+/* Uniform layout (WGSL address space)                                */
+/* ------------------------------------------------------------------ */
+
+interface UniformLayout {
+  size: number;
+  align: number;
+}
+
+function roundUp(value: number, alignment: number): number {
+  return alignment <= 1 ? value : Math.ceil(value / alignment) * alignment;
+}
+
+function scalarLayout(name: IRScalarName): UniformLayout {
+  return name === "f16" ? { size: 2, align: 2 } : { size: 4, align: 4 };
+}
+
+/**
+ * Computes the WGSL uniform-buffer layout of a type: each member is aligned to
+ * its natural alignment, vectors follow the vec2/vec3+ rules, and arrays use
+ * a stride rounded up to the element alignment.
+ */
+function wgslUniformLayout(
+  type: IRType,
+  structs: Map<string, IRStructDecl>,
+): UniformLayout {
+  switch (type.kind) {
+    case "scalar":
+      return scalarLayout(type.name);
+    case "vector": {
+      const element = scalarLayout(type.element);
+      const align = type.size === 2 ? element.align * 2 : element.align * 4;
+      return { size: element.size * type.size, align };
+    }
+    case "matrix": {
+      const element = scalarLayout(type.element);
+      const columnSize = element.size * type.rows;
+      const columnAlign = type.rows === 2 ? element.align * 2 : element.align * 4;
+      const stride = roundUp(columnSize, columnAlign);
+      return { size: type.columns * stride, align: columnAlign };
+    }
+    case "array": {
+      const element = wgslUniformLayout(type.element, structs);
+      const stride = roundUp(element.size, element.align);
+      return { size: type.size * stride, align: element.align };
+    }
+    case "struct": {
+      const decl = structs.get(type.name);
+      return decl ? layoutFields(decl.fields, structs) : { size: 16, align: 16 };
+    }
+    case "anonymousStruct":
+      return layoutFields(type.fields, structs);
+    case "tuple":
+      return layoutFields(
+        type.elements.map((fieldType, index) => ({ name: `_${index}`, type: fieldType })),
+        structs,
+      );
+    case "quaternion":
+      return { size: 16, align: 16 };
+    case "enum":
+      return { size: 4, align: 4 };
+    default:
+      return { size: 16, align: 16 };
+  }
+}
+
+function layoutFields(
+  fields: { name: string; type: IRType }[],
+  structs: Map<string, IRStructDecl>,
+): UniformLayout {
+  let offset = 0;
+  let align = 1;
+  for (const field of fields) {
+    const fieldLayout = wgslUniformLayout(field.type, structs);
+    align = Math.max(align, fieldLayout.align);
+    offset = roundUp(offset, fieldLayout.align) + fieldLayout.size;
+  }
+  return { size: roundUp(offset, align), align };
+}
+
+function structMap(module: IRModule): Map<string, IRStructDecl> {
+  const map = new Map<string, IRStructDecl>();
+  for (const item of module.items) {
+    if (item.kind === "struct") map.set(item.name, item);
+  }
+  return map;
+}
+
 /**
  * Converts a gl type to its WGSL equivalent string.
  *
@@ -126,18 +251,20 @@ function wgslType(t: IRType): string {
     return mapped;
   }
   if ((t.kind === "vector")) {
-    const prefix = VEC_TYPE_MAP[t.element] || "vec";
-    return `${prefix}${t.size}<${t.element}>`;
+    const element = SCALAR_MAP[t.element];
+    if (!element) throw new Error(`Unsupported WGSL vector element type: ${t.element}`);
+    return `vec${t.size}<${element}>`;
   }
   if ((t.kind === "struct")) return t.name;
   if ((t.kind === "sampler")) return "sampler";
   if (t.kind === "quaternion") return "vec4<f32>";
   if ((t.kind === "matrix")) {
-    const prefix = MAT_PREFIX_MAP[t.element] || "";
-    if (t.rows === t.columns) {
-      return `${prefix}mat${t.rows}x${t.rows}<${t.element}>`;
+    const element = SCALAR_MAP[t.element];
+    if (!element) throw new Error(`Unsupported WGSL matrix element type: ${t.element}`);
+    if (element !== "f32" && element !== "f16") {
+      throw new Error(`WGSL matrices require f32 or f16 elements, got ${t.element}`);
     }
-    return `${prefix}mat${t.columns}x${t.rows}<${t.element}>`;
+    return `mat${t.columns}x${t.rows}<${element}>`;
   }
   if (t.kind === "opaque") return t.name;
   if (t.kind === "anonymousStruct") {
@@ -219,6 +346,9 @@ function buildContext(
 export function generateWGSLFromIR(module: IRModule): string {
   const lines: string[] = [];
   lines.push("// Generated by @u84u/gl");
+  if (moduleUsesF16(module)) {
+    lines.push("enable f16;");
+  }
   lines.push("");
 
   const mainIndex = module.items.findIndex(
@@ -321,6 +451,38 @@ export function generateWGSLFromIR(module: IRModule): string {
  * @param indent - The indentation level (number of 2-space indent units).
  * @param ctx - The WGSL rendering context.
  */
+/**
+ * Emits an expression used in statement position. WGSL has no comma operator
+ * and assignment is not an expression, so assignments and updates are emitted
+ * as real statements and value-only expressions use phony assignment.
+ */
+function emitExpressionStatement(
+  lines: string[],
+  expr: IRExpression,
+  indent: number,
+  ctx: WgslContext,
+): void {
+  const pad = "  ".repeat(indent);
+  if (expr.kind === "match") {
+    emitMatchStatement(lines, expr, indent, ctx);
+    return;
+  }
+  if (expr.kind === "compoundAssign") {
+    const target = emitExpression(expr.target, ctx);
+    lines.push(
+      `${pad}${target} = ${target} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value, ctx)};`,
+    );
+    return;
+  }
+  if (expr.kind === "update") {
+    const target = emitExpression(expr.operand, ctx);
+    const op = expr.operator === "++" ? "+" : "-";
+    lines.push(`${pad}${target} = ${target} ${op} 1;`);
+    return;
+  }
+  lines.push(`${pad}_ = ${emitExpression(expr, ctx)};`);
+}
+
 function emitStatement(
   lines: string[],
   stmt: IRStatement | IRModuleItem,
@@ -384,7 +546,9 @@ function emitStatement(
   }
   if ((stmt.kind === "varDecl")) {
     if (stmt.initializer && (stmt.initializer.kind === "match")) {
-      lines.push(`${pad}let ${stmt.name}: ${wgslType(stmt.type)};`);
+      // A match expression is lowered to conditional assignments, which WGSL
+      // only permits through a mutable local.
+      lines.push(`${pad}var ${stmt.name}: ${wgslType(stmt.type)};`);
       emitMatchAssignStatement(lines, stmt.initializer, stmt.name, indent, ctx);
       return;
     }
@@ -392,7 +556,8 @@ function emitStatement(
     if (stmt.initializer) {
       init = ` = ${emitExpression(stmt.initializer, ctx)}`;
     }
-    const kind = stmt.mutable ? "var" : "let";
+    // WGSL `let` requires an initializer; an uninitialised local must be `var`.
+    const kind = stmt.mutable || !stmt.initializer ? "var" : "let";
     lines.push(`${pad}${kind} ${stmt.name}: ${wgslType(stmt.type)}${init};`);
     return;
   }
@@ -405,11 +570,7 @@ function emitStatement(
     return;
   }
   if ((stmt.kind === "expressionStmt")) {
-    if ((stmt.expression.kind === "match")) {
-      emitMatchStatement(lines, stmt.expression, indent, ctx);
-      return;
-    }
-    lines.push(`${pad}${emitExpression(stmt.expression, ctx)};`);
+    emitExpressionStatement(lines, stmt.expression, indent, ctx);
     return;
   }
   if ((stmt.kind === "block")) {
@@ -449,16 +610,18 @@ function emitStatement(
       const startCode = emitExpression(start, ctx);
       const endCode = emitExpression(end, ctx);
       const condOp = inclusive ? "<=" : "<";
-      // Declare the loop variable directly so body references to it resolve.
-      lines.push(`${pad}var ${variable} = ${startCode};`);
-      lines.push(`${pad}loop {`);
-      lines.push(`${pad}  if (!(${variable} ${condOp} ${endCode})) {`);
-      lines.push(`${pad}    break;`);
-      lines.push(`${pad}  }`);
+      // Scope the loop variable so it can shadow an outer binding.
+      lines.push(`${pad}{`);
+      lines.push(`${pad}  var ${variable} = ${startCode};`);
+      lines.push(`${pad}  loop {`);
+      lines.push(`${pad}    if (!(${variable} ${condOp} ${endCode})) {`);
+      lines.push(`${pad}      break;`);
+      lines.push(`${pad}    }`);
       for (const s of stmt.body.statements) {
         emitStatement(lines, s, indent + 2, ctx);
       }
-      lines.push(`${pad}  ${variable} = ${variable} + 1;`);
+      lines.push(`${pad}    ${variable} = ${variable} + 1;`);
+      lines.push(`${pad}  }`);
       lines.push(`${pad}}`);
       return;
     }
@@ -480,7 +643,7 @@ function emitStatement(
       emitStatement(lines, s, indent + 1, ctx);
     }
     if (stmt.increment) {
-      lines.push(`${pad}  ${emitExpression(stmt.increment, ctx)};`);
+      emitExpressionStatement(lines, stmt.increment, indent + 1, ctx);
     }
     lines.push(`${pad}}`);
     return;
@@ -547,6 +710,12 @@ function emitExpression(expr: IRExpression, ctx: WgslContext): string {
     return emitLiteral(expr);
   }
   if ((expr.kind === "binary")) {
+    if (expr.operator === "<=>") {
+      // WGSL has no spaceship operator; map to -1/0/1 comparisons.
+      const left = emitExpression(expr.left, ctx);
+      const right = emitExpression(expr.right, ctx);
+      return `select(select(i32(0), i32(1), (${left} > ${right})), i32(-1), (${left} < ${right}))`;
+    }
     return `(${emitExpression(expr.left, ctx)} ${expr.operator} ${emitExpression(expr.right, ctx)})`;
   }
   if ((expr.kind === "unary")) {
@@ -591,7 +760,7 @@ function emitExpression(expr: IRExpression, ctx: WgslContext): string {
   if ((expr.kind === "arrayLiteral")) {
     const elements = expr.elements.map((e) => emitExpression(e, ctx));
     const elementType = inferWgslElementType(expr.elements[0]!);
-    return `array<${elementType}>(${elements.join(", ")})`;
+    return `array<${elementType}, ${expr.elements.length}>(${elements.join(", ")})`;
   }
   if ((expr.kind === "compoundAssign")) {
     return `(${emitExpression(expr.target, ctx)} = ${emitExpression(expr.target, ctx)} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value, ctx)})`;
@@ -605,13 +774,15 @@ function emitExpression(expr: IRExpression, ctx: WgslContext): string {
     return `(${operandCode} = ${operandCode} ${op})`;
   }
   if ((expr.kind === "conditional")) {
-    return `(${emitExpression(expr.test, ctx)} ? ${emitExpression(expr.consequent, ctx)} : ${emitExpression(expr.alternate, ctx)})`;
+    // WGSL select(falseValue, trueValue, condition)
+    return `select(${emitExpression(expr.alternate, ctx)}, ${emitExpression(expr.consequent, ctx)}, ${emitExpression(expr.test, ctx)})`;
   }
   if ((expr.kind === "nullCoalescing")) {
-    return `(${emitExpression(expr.left, ctx)} != 0 ? ${emitExpression(expr.left, ctx)} : ${emitExpression(expr.right, ctx)})`;
+    const left = emitExpression(expr.left, ctx);
+    return `select(${emitExpression(expr.right, ctx)}, ${left}, (${left} != 0))`;
   }
   if ((expr.kind === "match")) {
-    return emitMatchExpression(expr, ctx);
+    throw new Error("Cannot emit a match expression in WGSL expression position");
   }
   if ((expr.kind === "blockExpr")) {
     const stmts = expr.block.statements;
@@ -626,46 +797,10 @@ function emitExpression(expr: IRExpression, ctx: WgslContext): string {
 }
 
 /**
- * Emits a match expression as an if-else-if-else chain returning a value.
- *
- * @param expr - The MatchExpr to emit.
- * @param ctx - The WGSL rendering context.
- * @returns The WGSL expression string.
- */
-function emitMatchExpression(expr: IRExpression, ctx: WgslContext): string {
-  if (!(expr.kind === "match")) throw new Error("Not a match expression");
-  const subjectCode = emitExpression(expr.subject, ctx);
-  const branches: string[] = [];
-  for (let i = 0; i < expr.arms.length; i++) {
-    const arm = expr.arms[i]!;
-    let condition = "true";
-    if (isLiteralPattern(arm.pattern) && arm.pattern.value !== null) {
-      condition = `(${subjectCode} == ${arm.pattern.value})`;
-    } else if (isBindingPattern(arm.pattern)) {
-      condition = "true";
-    }
-    const bodyCode = emitMatchBodyToString(arm.body.statements, ctx);
-    if (i === expr.arms.length - 1) {
-      branches.push(`else { ${bodyCode} }`);
-    } else {
-      branches.push(`if (${condition}) { ${bodyCode} }`);
-    }
-  }
-  return `(${branches.join(" ")})`;
-}
-
-/**
  * Type guard: literal pattern.
  */
 function isLiteralPattern(p: { kind: string }): p is { kind: "literal"; value: number | string | boolean } {
   return p.kind === "literal";
-}
-
-/**
- * Type guard: binding pattern.
- */
-function isBindingPattern(p: { kind: string }): p is { kind: "binding"; binding: string } {
-  return p.kind === "binding";
 }
 
 /**
@@ -776,62 +911,6 @@ function emitMatchBodyAssigning(
 }
 
 /**
- * Emits WGSL code for a list of statements as a flat string (used inside match arms).
- * Returns the value produced by the last ExpressionStmt, or empty string.
- *
- * @param stmts - The statements to emit.
- * @param ctx - The WGSL rendering context.
- * @returns The concatenated WGSL code string.
- */
-function emitMatchBodyToString(stmts: (IRStatement | IRModuleItem)[], ctx: WgslContext): string {
-  const parts: string[] = [];
-  for (const s of stmts) {
-    if ((s.kind === "return")) {
-      if (s.value) {
-        parts.push(`return ${emitExpression(s.value, ctx)};`);
-      } else {
-        parts.push("return;");
-      }
-    } else if ((s.kind === "expressionStmt")) {
-      parts.push(`${emitExpression(s.expression, ctx)};`);
-    } else if ((s.kind === "varDecl")) {
-      let init = "";
-      if (s.initializer) {
-        init = ` = ${emitExpression(s.initializer, ctx)}`;
-      }
-      const kind = s.mutable ? "var" : "let";
-      parts.push(`${kind} ${s.name}: ${wgslType(s.type)}${init};`);
-    } else if ((s.kind === "block")) {
-      parts.push("{ ");
-      for (const inner of s.statements) {
-        parts.push(emitMatchBodyToString([inner], ctx));
-      }
-      parts.push(" }");
-    } else if ((s.kind === "if")) {
-      parts.push(`if (${emitExpression(s.condition, ctx)}) { `);
-      for (const inner of s.thenBranch.statements) {
-        parts.push(emitMatchBodyToString([inner], ctx));
-      }
-      parts.push(" }");
-      if (s.elseBranch) {
-        parts.push(" else { ");
-        for (const inner of s.elseBranch.statements) {
-          parts.push(emitMatchBodyToString([inner], ctx));
-        }
-        parts.push(" }");
-      }
-    } else if ((s.kind === "discard")) {
-      parts.push("discard;");
-    } else if ((s.kind === "break")) {
-      parts.push("break;");
-    } else if ((s.kind === "continue")) {
-      parts.push("continue;");
-    }
-  }
-  return parts.join(" ");
-}
-
-/**
  * Infers the WGSL element type string for an array literal from its first element.
  *
  * @param expr - The first element expression.
@@ -898,7 +977,7 @@ export function validateWGSLModuleIR(
   const diagnostics: Diagnostic[] = [];
   const seen = new Set<IRType>();
 
-  function checkType(t: IRType, span: { line: number; column: number }): void {
+  function checkType(t: IRType, span: { line: number; column: number }, itemFile: string): void {
     const nested: IRType[] = [];
     const collect = (x: IRType): void => {
       if (seen.has(x)) return;
@@ -908,8 +987,19 @@ export function validateWGSLModuleIR(
           nested.push(x);
           break;
         case "vector":
+          nested.push({ kind: "scalar", name: x.element } as IRType);
+          break;
         case "matrix":
           nested.push({ kind: "scalar", name: x.element } as IRType);
+          if (x.element !== "f32" && x.element !== "f16") {
+            diagnostics.push(
+              diagnostic(itemFile, span, `WGSL does not support matrix element type '${x.element}'`, {
+                code: "WGSL_UNSUPPORTED_MATRIX",
+                severity: "error",
+                help: "WGSL matrices require f32 or f16 elements.",
+              }),
+            );
+          }
           break;
         case "array":
           collect(x.element);
@@ -940,7 +1030,7 @@ export function validateWGSLModuleIR(
       const name = nt.name;
       if (!scalarIsSupported(capabilities, name as any)) {
         diagnostics.push(
-          diagnostic(file, span, `WGSL does not support scalar type '${name}'`, {
+          diagnostic(itemFile, span, `WGSL does not support scalar type '${name}'`, {
             code: "WGSL_UNSUPPORTED_SCALAR",
             severity: "error",
             help: `Convert to a supported type (${Array.from(capabilities.scalarTypes).join(", ")}) or use an explicit cast.`,
@@ -959,44 +1049,45 @@ export function validateWGSLModuleIR(
   }
 
   function walkStmt(stmt: IRStatement | IRModuleItem): void {
+    const itemFile = ("sourceFile" in stmt && stmt.sourceFile) || file;
     switch (stmt.kind) {
       case "varDecl":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         if (stmt.initializer) { /* expressions not type-checked here */ }
         break;
       case "binding":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         break;
       case "fn":
-        for (const p of stmt.params) checkType(p.type, spanOf(stmt));
-        checkType(stmt.returnType, spanOf(stmt));
+        for (const p of stmt.params) checkType(p.type, spanOf(stmt), itemFile);
+        checkType(stmt.returnType, spanOf(stmt), itemFile);
         walkBlock(stmt.body);
         break;
       case "struct":
-        for (const f of stmt.fields) checkType(f.type, spanOf(stmt));
+        for (const f of stmt.fields) checkType(f.type, spanOf(stmt), itemFile);
         break;
       case "enum":
         for (const v of stmt.variants) {
-          if (v.type) checkType(v.type, spanOf(stmt));
+          if (v.type) checkType(v.type, spanOf(stmt), itemFile);
         }
         break;
       case "typeAlias":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         break;
       case "newtype":
-        checkType(stmt.innerType, spanOf(stmt));
+        checkType(stmt.innerType, spanOf(stmt), itemFile);
         break;
       case "trait":
         for (const m of stmt.methods) {
-          for (const p of m.params) checkType(p.type, spanOf(stmt));
-          checkType(m.returnType, spanOf(stmt));
+          for (const p of m.params) checkType(p.type, spanOf(stmt), itemFile);
+          checkType(m.returnType, spanOf(stmt), itemFile);
         }
         break;
       case "implBlock":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         for (const m of stmt.methods) {
-          for (const p of m.params) checkType(p.type, spanOf(stmt));
-          checkType(m.returnType, spanOf(stmt));
+          for (const p of m.params) checkType(p.type, spanOf(stmt), itemFile);
+          checkType(m.returnType, spanOf(stmt), itemFile);
         }
         break;
       case "if":
@@ -1031,7 +1122,7 @@ export function validateWGSLModuleIR(
     const stage = mainFn.stage;
     if (!capabilities.shaderStages.has(stage as any)) {
       diagnostics.push(
-        diagnostic(file, spanOf(mainFn), `WGSL target does not support shader stage '${stage}'`, {
+        diagnostic(mainFn.sourceFile ?? file, spanOf(mainFn), `WGSL target does not support shader stage '${stage}'`, {
           code: "WGSL_UNSUPPORTED_STAGE",
           severity: "error",
           help: `Supported stages: ${Array.from(capabilities.shaderStages).join(", ")}`,
@@ -1044,10 +1135,11 @@ export function validateWGSLModuleIR(
   for (const item of module.items) {
     if (item.kind !== "binding") continue;
     const span = spanOf(item);
+    const itemFile = item.sourceFile ?? file;
     if (item.type.kind === "sampler") {
       if (!capabilities.resourceKinds.has("sampledTexture")) {
         diagnostics.push(
-          diagnostic(file, span, `WGSL target does not support sampled texture bindings`, {
+          diagnostic(itemFile, span, `WGSL target does not support sampled texture bindings`, {
             code: "WGSL_UNSUPPORTED_RESOURCE",
             severity: "error",
             help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
@@ -1056,7 +1148,7 @@ export function validateWGSLModuleIR(
       }
       if (!capabilities.resourceKinds.has("sampler")) {
         diagnostics.push(
-          diagnostic(file, span, `WGSL target does not support sampler bindings`, {
+          diagnostic(itemFile, span, `WGSL target does not support sampler bindings`, {
             code: "WGSL_UNSUPPORTED_RESOURCE",
             severity: "error",
             help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
@@ -1066,7 +1158,7 @@ export function validateWGSLModuleIR(
     } else {
       if (!capabilities.resourceKinds.has("uniformBuffer")) {
         diagnostics.push(
-          diagnostic(file, span, `WGSL target does not support uniform buffer bindings`, {
+          diagnostic(itemFile, span, `WGSL target does not support uniform buffer bindings`, {
             code: "WGSL_UNSUPPORTED_RESOURCE",
             severity: "error",
             help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
@@ -1140,9 +1232,14 @@ export class WgslBackend implements ShaderCodegenBackend {
           s.kind === "fn" && s.name === "main",
       );
       const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
+      const mainReturnStruct =
+        mainStmt && mainStmt.returnType.kind === "struct" ? mainStmt.returnType.name : null;
+      // Reuse the same binding plan as code generation so reflection reports
+      // the synthesized sampler bindings that are actually emitted.
+      const ctx = buildContext(module, mainReturnStruct);
+      const structs = structMap(module);
       const resources: ShaderResourceReflection[] = [];
       const uniforms: ShaderUniformReflection[] = [];
-      let uniformOffset = 0;
       for (const b of module.items) {
         if (b.kind !== "binding") continue;
         const isSampler = b.type.kind === "sampler";
@@ -1154,23 +1251,23 @@ export class WgslBackend implements ShaderCodegenBackend {
           stageVisibility: [stage],
         });
         if (isSampler) {
+          const samplerInfo = ctx.samplerMap.get(b.name);
           resources.push({
-            name: `${b.name}_sampler`,
+            name: samplerInfo?.samplerName ?? `${b.name}_sampler`,
             kind: "sampler",
-            binding: b.binding,
+            binding: samplerInfo?.samplerBinding ?? b.binding,
             set: 0,
             stageVisibility: [stage],
           });
         } else {
-          const typeName = wgslType(b.type);
-          const size = typeName === "f32" || typeName === "i32" || typeName === "u32" || typeName === "bool" ? 4 : 16;
+          const layout = wgslUniformLayout(b.type, structs);
           uniforms.push({
             name: b.name,
-            type: typeName,
-            offset: uniformOffset,
-            size,
+            type: wgslType(b.type),
+            // Each @binding is its own uniform buffer, so the member starts at 0.
+            offset: 0,
+            size: layout.size,
           });
-          uniformOffset += size;
         }
       }
       const inputs = mainStmt

@@ -1,5 +1,5 @@
 import { readFile, realpath } from "node:fs/promises";
-import { resolve, dirname, relative, isAbsolute } from "node:path";
+import { resolve, dirname, relative, isAbsolute, sep } from "node:path";
 import { SourceModule, SourceResolver } from "../modules/resolver";
 
 /**
@@ -30,8 +30,10 @@ export class NodeFileSourceResolver implements SourceResolver {
       canonicalTarget = resolvedPath;
     }
 
+    // Only reject an actual parent traversal. A filename such as `..config.gl`
+    // is a legitimate child of the root even though it starts with `..`.
     const rel = relative(canonicalRoot, canonicalTarget);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new Error(
         `Import "${specifier}" resolves outside configured root ${this.rootDir}`,
       );

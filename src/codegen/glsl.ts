@@ -107,6 +107,92 @@ export function glslType(t: IRType): string {
   throw new Error(`Cannot emit GLSL type for ${t.kind}`);
 }
 
+interface GlslUniformLayout {
+  size: number;
+  align: number;
+}
+
+function glslScalarSize(name: string): number {
+  return name === "i64" || name === "u64" || name === "f64" ? 8 : 4;
+}
+
+function roundUp(value: number, alignment: number): number {
+  return alignment <= 1 ? value : Math.ceil(value / alignment) * alignment;
+}
+
+/**
+ * Computes a natural layout for a standalone GLSL uniform. Standalone uniforms
+ * have no std140/std430 block layout, so offsets are reported per declaration
+ * and sizes follow the declared type rather than a blanket 16 bytes.
+ */
+export function glslUniformLayout(
+  type: IRType,
+  structs: Map<string, IRStructDecl>,
+): GlslUniformLayout {
+  switch (type.kind) {
+    case "scalar": {
+      const size = glslScalarSize(type.name);
+      return { size, align: size };
+    }
+    case "vector": {
+      const scalar = glslScalarSize(type.element);
+      const align = type.size === 2 ? scalar * 2 : scalar * 4;
+      return { size: scalar * type.size, align };
+    }
+    case "matrix": {
+      const scalar = glslScalarSize(type.element);
+      const columnSize = scalar * type.rows;
+      const columnAlign = type.rows === 2 ? scalar * 2 : scalar * 4;
+      const stride = roundUp(columnSize, columnAlign);
+      return { size: type.columns * stride, align: columnAlign };
+    }
+    case "array": {
+      const element = glslUniformLayout(type.element, structs);
+      const stride = roundUp(element.size, element.align);
+      return { size: type.size * stride, align: element.align };
+    }
+    case "struct": {
+      const decl = structs.get(type.name);
+      return decl ? glslLayoutFields(decl.fields, structs) : { size: 16, align: 16 };
+    }
+    case "anonymousStruct":
+      return glslLayoutFields(type.fields, structs);
+    case "tuple":
+      return glslLayoutFields(
+        type.elements.map((fieldType, index) => ({ name: `_${index}`, type: fieldType })),
+        structs,
+      );
+    case "quaternion":
+      return { size: 16, align: 16 };
+    case "enum":
+      return { size: 4, align: 4 };
+    default:
+      return { size: 16, align: 16 };
+  }
+}
+
+function glslLayoutFields(
+  fields: { name: string; type: IRType }[],
+  structs: Map<string, IRStructDecl>,
+): GlslUniformLayout {
+  let offset = 0;
+  let align = 1;
+  for (const field of fields) {
+    const fieldLayout = glslUniformLayout(field.type, structs);
+    align = Math.max(align, fieldLayout.align);
+    offset = roundUp(offset, fieldLayout.align) + fieldLayout.size;
+  }
+  return { size: roundUp(offset, align), align };
+}
+
+export function glslStructMap(module: IRModule): Map<string, IRStructDecl> {
+  const map = new Map<string, IRStructDecl>();
+  for (const item of module.items) {
+    if (item.kind === "struct") map.set(item.name, item);
+  }
+  return map;
+}
+
 /**
  * Generates GLSL source code from a parsed Program AST.
  *
@@ -186,8 +272,6 @@ export function generateGLSLFromIR(module: IRModule, target?: "glsl-450" | "glsl
       }
     } else if (stage === "vertex") {
       if ((returnType.kind === "vector") && returnType.size === 4) {
-        lines.push("out vec4 gl_Position;");
-        lines.push("");
         lines.push("void main() {");
         for (const s of mainFn.body.statements) {
           emitStatement(lines, s, 1, stage, { structName: "", fields: [] });
@@ -292,6 +376,11 @@ function emitStatement(
     } else {
       declType = glslType(stmt.type);
     }
+    if (stmt.initializer && stmt.initializer.kind === "match") {
+      lines.push(`${pad}${declType} ${stmt.name}${declSuffix};`);
+      emitMatchAssignStatement(lines, stmt.initializer, stmt.name, indent, stage, outputInfo);
+      return;
+    }
     let init = "";
     if (stmt.initializer) {
       if ((stmt.initializer.kind === "structLiteral")) {
@@ -344,6 +433,10 @@ function emitStatement(
     return;
   }
   if ((stmt.kind === "expressionStmt")) {
+    if (stmt.expression.kind === "match") {
+      emitMatchStatement(lines, stmt.expression, indent, stage, outputInfo);
+      return;
+    }
     lines.push(`${pad}${emitExpression(stmt.expression)};`);
     return;
   }
@@ -384,7 +477,7 @@ function emitStatement(
       const endCode = emitExpression(stmt.range.end);
       const condOp = stmt.range.inclusive ? "<=" : "<";
       // Loop variable is implicitly an int
-      lines.push(`${pad}for (int __loop_var = ${startCode}; __loop_var ${condOp} ${endCode}; __loop_var++) {`);
+      lines.push(`${pad}for (int loopIndex = ${startCode}; loopIndex ${condOp} ${endCode}; loopIndex++) {`);
       for (const s of stmt.body.statements) {
         emitStatement(lines, s, indent + 1, stage, outputInfo);
       }
@@ -495,6 +588,11 @@ function emitExpression(expr: IRExpression): string {
     return emitLiteral(expr);
   }
   if ((expr.kind === "binary")) {
+    if (expr.operator === "<=>") {
+      const left = emitExpression(expr.left);
+      const right = emitExpression(expr.right);
+      return `((${left} < ${right}) ? -1 : ((${left} > ${right}) ? 1 : 0))`;
+    }
     return `(${emitExpression(expr.left)} ${expr.operator} ${emitExpression(expr.right)})`;
   }
   if ((expr.kind === "unary")) {
@@ -560,22 +658,7 @@ function emitExpression(expr: IRExpression): string {
     return `(${emitExpression(expr.left)} != 0 ? ${emitExpression(expr.left)} : ${emitExpression(expr.right)})`;
   }
   if ((expr.kind === "match")) {
-    const subjectCode = emitExpression(expr.subject);
-    const branches: string[] = [];
-    for (let i = 0; i < expr.arms.length; i++) {
-      const arm = expr.arms[i]!;
-      let condition = "true";
-      if (isLiteralPattern(arm.pattern) && arm.pattern.value !== null) {
-        condition = `(${subjectCode} == ${arm.pattern.value})`;
-      }
-      const bodyCode = emitMatchBodyToString(arm.body.statements);
-      if (i === expr.arms.length - 1 && isBindingPattern(arm.pattern)) {
-        branches.push(`else { ${bodyCode} }`);
-      } else {
-        branches.push(`if (${condition}) { ${bodyCode} }`);
-      }
-    }
-    return `(${branches.join(" ")})`;
+    throw new Error("Cannot emit a match expression in GLSL expression position");
   }
   if ((expr.kind === "blockExpr")) {
     const stmts = expr.block.statements;
@@ -597,96 +680,76 @@ function isLiteralPattern(p: { kind: string }): p is { kind: "literal"; value: n
 }
 
 /**
- * Type guard: binding pattern.
+ * Emits a match expression used as a statement (if/else chain).
  */
-function isBindingPattern(p: { kind: string }): p is { kind: "binding"; binding: string } {
-  return p.kind === "binding";
+function emitMatchStatement(
+  lines: string[],
+  expr: Extract<IRExpression, { kind: "match" }>,
+  indent: number,
+  stage: ShaderStage,
+  outputInfo: { structName: string; fields: { name: string; type: IRType }[] } | null,
+): void {
+  const pad = "  ".repeat(indent);
+  const subject = emitExpression(expr.subject);
+  for (let i = 0; i < expr.arms.length; i++) {
+    const arm = expr.arms[i]!;
+    const condition =
+      isLiteralPattern(arm.pattern) && arm.pattern.value !== null
+        ? `(${subject} == ${arm.pattern.value})`
+        : "true";
+    const isLast = i === expr.arms.length - 1;
+    const keyword =
+      i === 0
+        ? `if (${condition})`
+        : isLast && condition === "true"
+          ? "else"
+          : `else if (${condition})`;
+    lines.push(`${pad}${keyword} {`);
+    for (const s of arm.body.statements) {
+      emitStatement(lines, s, indent + 1, stage, outputInfo);
+    }
+    lines.push(`${pad}}`);
+  }
 }
 
 /**
- * Emits GLSL code for a list of statements as a flat string (used inside match arms).
- *
- * @param stmts - The statements to emit.
- * @returns The concatenated GLSL code string.
+ * Emits a match expression as conditional assignments into a target variable.
  */
-function emitMatchBodyToString(stmts: (IRStatement | IRModuleItem)[]): string {
-  const parts: string[] = [];
-  for (const s of stmts) {
-    if ((s.kind === "return")) {
-      if (s.value) {
-        parts.push(`return ${emitExpression(s.value)};`);
+function emitMatchAssignStatement(
+  lines: string[],
+  expr: Extract<IRExpression, { kind: "match" }>,
+  target: string,
+  indent: number,
+  stage: ShaderStage,
+  outputInfo: { structName: string; fields: { name: string; type: IRType }[] } | null,
+): void {
+  const pad = "  ".repeat(indent);
+  const subject = emitExpression(expr.subject);
+  for (let i = 0; i < expr.arms.length; i++) {
+    const arm = expr.arms[i]!;
+    const condition =
+      isLiteralPattern(arm.pattern) && arm.pattern.value !== null
+        ? `(${subject} == ${arm.pattern.value})`
+        : "true";
+    const isLast = i === expr.arms.length - 1;
+    const keyword =
+      i === 0
+        ? `if (${condition})`
+        : isLast && condition === "true"
+          ? "else"
+          : `else if (${condition})`;
+    lines.push(`${pad}${keyword} {`);
+    const body = arm.body.statements;
+    for (let j = 0; j < body.length; j++) {
+      const s = body[j]!;
+      if (j === body.length - 1 && s.kind === "expressionStmt") {
+        lines.push(`${pad}  ${target} = ${emitExpression(s.expression)};`);
       } else {
-        parts.push("return;");
+        emitStatement(lines, s, indent + 1, stage, outputInfo);
       }
-    } else if ((s.kind === "expressionStmt")) {
-      parts.push(`${emitExpression(s.expression)};`);
-    } else if ((s.kind === "discard")) {
-      parts.push("discard;");
-    } else if ((s.kind === "panic")) {
-      parts.push(s.message ? `panic ${emitExpression(s.message)};` : "panic;");
-    } else if ((s.kind === "unreachable")) {
-      parts.push("unreachable;");
-    } else if ((s.kind === "break")) {
-      parts.push("break;");
-    } else if ((s.kind === "continue")) {
-      parts.push("continue;");
-    } else if ((s.kind === "block")) {
-      parts.push("{ ");
-      for (const inner of s.statements) {
-        parts.push(emitMatchBodyToString([inner]));
-      }
-      parts.push(" }");
-    } else if ((s.kind === "if")) {
-      parts.push(`if (${emitExpression(s.condition)}) { `);
-      for (const inner of s.thenBranch.statements) {
-        parts.push(emitMatchBodyToString([inner]));
-      }
-      parts.push(" }");
-      if (s.elseBranch) {
-        parts.push(" else { ");
-        for (const inner of s.elseBranch.statements) {
-          parts.push(emitMatchBodyToString([inner]));
-        }
-        parts.push(" }");
-      }
-    } else if ((s.kind === "varDecl")) {
-      let init = "";
-      if (s.initializer) {
-        if ((s.initializer.kind === "structLiteral")) {
-          const args = s.initializer.fields.map((f) => emitExpression(f.value)).join(", ");
-          init = ` = ${glslType(s.type)}(${args})`;
-        } else {
-          init = ` = ${emitExpression(s.initializer)}`;
-        }
-      }
-      parts.push(`${glslType(s.type)} ${s.name}${init};`);
-    } else if ((s.kind === "while")) {
-      parts.push(`while (${emitExpression(s.condition)}) { `);
-      for (const inner of s.body.statements) {
-        parts.push(emitMatchBodyToString([inner]));
-      }
-      parts.push(" }");
-    } else if ((s.kind === "for")) {
-      parts.push("for (;;) { ");
-      for (const inner of s.body.statements) {
-        parts.push(emitMatchBodyToString([inner]));
-      }
-      parts.push(" }");
-    } else if ((s.kind === "doWhile")) {
-      parts.push("do { ");
-      for (const inner of s.body.statements) {
-        parts.push(emitMatchBodyToString([inner]));
-      }
-      parts.push(`} while (${emitExpression(s.condition)});`);
-    } else if ((s.kind === "loop")) {
-      parts.push("for (;;) { ");
-      for (const inner of s.body.statements) {
-        parts.push(emitMatchBodyToString([inner]));
-      }
-      parts.push(" }");
     }
+    lines.push(`${pad}}`);
   }
-  return parts.join(" ");
 }
 
 /**
@@ -701,6 +764,8 @@ function glslBuiltinName(name: string): { kind: "builtin"; name: string } | { ki
     extract: "bitfieldExtract",
     insert: "bitfieldInsert",
     reverse: "bitfieldReverse",
+    deg: "degrees",
+    rad: "radians",
   };
   const mapped = map[name];
   if (mapped) return { kind: "builtin", name: mapped };
@@ -728,7 +793,7 @@ function emitLiteral(expr: Extract<IRExpression, { kind: "literal" }>): string {
     return charToCode(typeof value === "string" ? value : String(value)).toString();
   }
   if ((expr.kind === "literal" && expr.literalKind === "color")) {
-    return `0x${typeof value === "string" ? value : String(value)}`;
+    return `0x${typeof value === "string" ? value : String(value)}u`;
   }
   return String(value);
 }
@@ -802,7 +867,7 @@ export function validateGLSLModuleIR(
   const diagnostics: Diagnostic[] = [];
   const seen = new Set<IRType>();
 
-  function checkType(t: IRType, span: { line: number; column: number }): void {
+  function checkType(t: IRType, span: { line: number; column: number }, itemFile: string): void {
     const nested: IRType[] = [];
     const collect = (x: IRType): void => {
       if (seen.has(x)) return;
@@ -844,7 +909,7 @@ export function validateGLSLModuleIR(
       const name = nt.name;
       if (!scalarIsSupported(capabilities, name as any)) {
         diagnostics.push(
-          diagnostic(file, span, `GLSL does not support scalar type '${name}'`, {
+          diagnostic(itemFile, span, `GLSL does not support scalar type '${name}'`, {
             code: "GLSL_UNSUPPORTED_SCALAR",
             severity: "error",
             help: `Convert to a supported type (${Array.from(capabilities.scalarTypes).join(", ")}) or use an explicit cast.`,
@@ -863,44 +928,45 @@ export function validateGLSLModuleIR(
   }
 
   function walkStmt(stmt: IRStatement | IRModuleItem): void {
+    const itemFile = ("sourceFile" in stmt && stmt.sourceFile) || file;
     switch (stmt.kind) {
       case "varDecl":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         if (stmt.initializer) { /* expressions not type-checked here */ }
         break;
       case "binding":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         break;
       case "fn":
-        for (const p of stmt.params) checkType(p.type, spanOf(stmt));
-        checkType(stmt.returnType, spanOf(stmt));
+        for (const p of stmt.params) checkType(p.type, spanOf(stmt), itemFile);
+        checkType(stmt.returnType, spanOf(stmt), itemFile);
         walkBlock(stmt.body);
         break;
       case "struct":
-        for (const f of stmt.fields) checkType(f.type, spanOf(stmt));
+        for (const f of stmt.fields) checkType(f.type, spanOf(stmt), itemFile);
         break;
       case "enum":
         for (const v of stmt.variants) {
-          if (v.type) checkType(v.type, spanOf(stmt));
+          if (v.type) checkType(v.type, spanOf(stmt), itemFile);
         }
         break;
       case "typeAlias":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         break;
       case "newtype":
-        checkType(stmt.innerType, spanOf(stmt));
+        checkType(stmt.innerType, spanOf(stmt), itemFile);
         break;
       case "trait":
         for (const m of stmt.methods) {
-          for (const p of m.params) checkType(p.type, spanOf(stmt));
-          checkType(m.returnType, spanOf(stmt));
+          for (const p of m.params) checkType(p.type, spanOf(stmt), itemFile);
+          checkType(m.returnType, spanOf(stmt), itemFile);
         }
         break;
       case "implBlock":
-        checkType(stmt.type, spanOf(stmt));
+        checkType(stmt.type, spanOf(stmt), itemFile);
         for (const m of stmt.methods) {
-          for (const p of m.params) checkType(p.type, spanOf(stmt));
-          checkType(m.returnType, spanOf(stmt));
+          for (const p of m.params) checkType(p.type, spanOf(stmt), itemFile);
+          checkType(m.returnType, spanOf(stmt), itemFile);
         }
         break;
       case "if":
@@ -935,7 +1001,7 @@ export function validateGLSLModuleIR(
     const stage = mainFn.stage;
     if (!capabilities.shaderStages.has(stage as any)) {
       diagnostics.push(
-        diagnostic(file, spanOf(mainFn), `GLSL target does not support shader stage '${stage}'`, {
+        diagnostic(mainFn.sourceFile ?? file, spanOf(mainFn), `GLSL target does not support shader stage '${stage}'`, {
           code: "GLSL_UNSUPPORTED_STAGE",
           severity: "error",
           help: `Supported stages: ${Array.from(capabilities.shaderStages).join(", ")}`,
@@ -948,10 +1014,11 @@ export function validateGLSLModuleIR(
   for (const item of module.items) {
     if (item.kind !== "binding") continue;
     const span = spanOf(item);
+    const itemFile = item.sourceFile ?? file;
     if (item.type.kind === "sampler") {
       if (!capabilities.resourceKinds.has("sampledTexture")) {
         diagnostics.push(
-          diagnostic(file, span, `GLSL target does not support sampled texture bindings`, {
+          diagnostic(itemFile, span, `GLSL target does not support sampled texture bindings`, {
             code: "GLSL_UNSUPPORTED_RESOURCE",
             severity: "error",
             help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
@@ -960,7 +1027,7 @@ export function validateGLSLModuleIR(
       }
       if (!capabilities.resourceKinds.has("sampler")) {
         diagnostics.push(
-          diagnostic(file, span, `GLSL target does not support sampler bindings`, {
+          diagnostic(itemFile, span, `GLSL target does not support sampler bindings`, {
             code: "GLSL_UNSUPPORTED_RESOURCE",
             severity: "error",
             help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
@@ -970,7 +1037,7 @@ export function validateGLSLModuleIR(
     } else {
       if (!capabilities.resourceKinds.has("uniformBuffer")) {
         diagnostics.push(
-          diagnostic(file, span, `GLSL target does not support uniform buffer bindings`, {
+          diagnostic(itemFile, span, `GLSL target does not support uniform buffer bindings`, {
             code: "GLSL_UNSUPPORTED_RESOURCE",
             severity: "error",
             help: `Supported resource kinds: ${Array.from(capabilities.resourceKinds).join(", ")}`,
@@ -1045,29 +1112,30 @@ export class GlslBackend implements ShaderCodegenBackend {
           s.kind === "fn" && s.name === "main",
       );
       const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
+      const structs = glslStructMap(module);
       const resources: ShaderResourceReflection[] = [];
       const uniforms: ShaderUniformReflection[] = [];
-      let uniformOffset = 0;
       for (const b of module.items) {
         if (b.kind !== "binding") continue;
         const isSampler = b.type.kind === "sampler";
         resources.push({
           name: b.name,
-          kind: isSampler ? "sampler" : "uniformBuffer",
+          // GLSL emits standalone uniforms, not uniform blocks, for
+          // non-sampler bindings.
+          kind: isSampler ? "sampler" : "uniform",
           binding: b.binding,
           set: 0,
           stageVisibility: [stage],
         });
         if (!isSampler) {
-          const typeName = glslType(b.type);
-          const size = typeName === "float" || typeName === "int" || typeName === "uint" || typeName === "bool" ? 4 : 16;
+          const layout = glslUniformLayout(b.type, structs);
           uniforms.push({
             name: b.name,
-            type: typeName,
-            offset: uniformOffset,
-            size,
+            type: glslType(b.type),
+            // Each binding is a separate standalone uniform declaration.
+            offset: 0,
+            size: layout.size,
           });
-          uniformOffset += size;
         }
       }
       const inputs = mainStmt

@@ -30,7 +30,7 @@ export const WGSL_CAPABILITIES: BackendCapabilities = {
   id: "wgsl",
   version: "1.0",
   shaderStages: new Set(["vertex", "fragment", "compute"]),
-  scalarTypes: new Set(["i8", "u8", "i16", "u16", "i32", "u32", "f32", "f16", "bool"]),
+  scalarTypes: new Set(["i32", "u32", "f32", "f16", "bool"]),
   resourceKinds: new Set(["uniformBuffer", "storageBuffer", "sampledTexture", "storageTexture", "sampler"]),
   supportsStorageBuffers: true,
   supportsCompute: true,

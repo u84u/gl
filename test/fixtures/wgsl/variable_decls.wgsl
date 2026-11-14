@@ -4,6 +4,6 @@
 fn main() -> @location(0) vec4<f32> {
   let x: f32 = 1.0;
   var y: f32 = 5.0;
-  (y = y + 1.0);
+  y = y + 1.0;
   return vec4<f32>(x, y, 0.0, 1.0);
 }

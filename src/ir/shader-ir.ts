@@ -524,7 +524,12 @@ export interface IRSourceFile {
   displayName?: string;
 }
 
-export type IRModuleItem =
+export interface IRSourceAttribution {
+  /** Canonical identity of the source module that declared this item. */
+  sourceFile?: string;
+}
+
+export type IRModuleItem = (
   | IRStructDecl
   | IREnumDecl
   | IRFnDecl
@@ -534,7 +539,8 @@ export type IRModuleItem =
   | IROpaqueDecl
   | IRTraitDecl
   | IRImplBlock
-  | IRStatement;
+  | IRStatement
+) & IRSourceAttribution;
 
 export interface IRModule {
   items: IRModuleItem[];

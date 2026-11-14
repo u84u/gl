@@ -2,6 +2,6 @@
 
 @fragment
 fn main() -> @location(0) vec4<f32> {
-  let a: i32 = (1 <=> 2);
+  let a: i32 = select(select(i32(0), i32(1), (1 > 2)), i32(-1), (1 < 2));
   return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }

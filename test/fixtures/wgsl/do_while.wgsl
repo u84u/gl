@@ -4,7 +4,7 @@
 fn main() -> @location(0) vec4<f32> {
   var i: i32 = 0;
   loop {
-    (i = i + 1);
+    i = i + 1;
     if (!((i < 3))) {
       break;
     }

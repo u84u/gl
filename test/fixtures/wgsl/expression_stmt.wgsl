@@ -3,6 +3,6 @@
 @fragment
 fn main() -> @location(0) vec4<f32> {
   let x: f32 = 1.0;
-  x;
+  _ = x;
   return vec4<f32>(x, 0.0, 0.0, 1.0);
 }

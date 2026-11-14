@@ -52,7 +52,7 @@ Backends register themselves in `defaultRegistry` (`src/codegen/backend.ts`). `c
 | `glsl-es-300` | WebGL 2 | `#version 300 es` |
 | `wgsl` | WebGPU | n/a |
 
-`glsl` is an alias for `glsl-450`. GLSL ES 3.00 is a distinct backend — not merely GLSL 4.50 with a different version line (adds `precision mediump float;`, rejects f64/64-bit ints).
+`glsl` is an alias for `glsl-450`. GLSL ES 3.00 is a distinct backend — not merely GLSL 4.50 with a different version line (adds `precision mediump float;` after a first-line `#version`, rejects f64/64-bit ints, and omits GLSL 4.50 uniform `layout(binding = N)` qualifiers).
 
 ## Shader stages
 
@@ -110,11 +110,11 @@ Structured `Diagnostic` type: `file`, `code?`, `severity?` ("error"\|"warning"\|
 
 Each `ShaderArtifact.reflection` contains:
 - `entryPoints`: entry point name, stage, inputs (params), outputs (return values with `location`/`builtin`)
-- `resources`: every binding declaration, with `kind` ("sampler" or "uniformBuffer"), `binding`, `set`, `stageVisibility`; synthesized sampler bindings for texture bindings are also included (WGSL)
-- `uniforms`: uniform buffer declarations with `name`, `type`, `offset`, `size`
+- `resources`: every binding declaration, with `kind` ("sampler", "sampledTexture", "uniform" for standalone GLSL uniforms, or "uniformBuffer" for WGSL `var<uniform>`), `binding`, `set`, `stageVisibility`; synthesized sampler bindings for texture bindings are also included (WGSL) and report the binding codegen actually emits
+- `uniforms`: uniform declarations with `name`, `type`, `offset`, `size` (GLSL standalone uniforms each use `offset: 0`; WGSL sizes follow uniform address-space layout)
 
 Backend capability diagnostics use stable codes:
-- `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `WGSL_UNSUPPORTED_RESOURCE`
+- `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `WGSL_UNSUPPORTED_RESOURCE`, `WGSL_UNSUPPORTED_MATRIX`
 - `GLSL_UNSUPPORTED_SCALAR`, `GLSL_UNSUPPORTED_STAGE`, `GLSL_UNSUPPORTED_RESOURCE`
 
 Backend capability enforcement validates:

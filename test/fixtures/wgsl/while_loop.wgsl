@@ -4,7 +4,7 @@
 fn main() -> @location(0) vec4<f32> {
   var i: i32 = 0;
   while (i < 5) {
-    (i = i + 1);
+    i = i + 1;
   }
   return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }

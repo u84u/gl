@@ -75,13 +75,13 @@ Each `ShaderArtifact` includes `stage`, `entryPoint`, `code`, and `reflection` (
 
 `ShaderReflection` includes:
 - `entryPoints`: entry point name, stage, inputs (params with name/type), outputs (return values with name/type/location/builtin)
-- `resources`: every binding with `kind` ("sampler"/"uniformBuffer"/"sampledTexture"), `binding`, `set`, `stageVisibility`; synthesized sampler bindings for texture bindings are also included (WGSL)
-- `uniforms`: uniform buffer declarations with `name`, `type`, `offset`, `size`
+- `resources`: every binding with `kind` ("sampler"/"sampledTexture"/"uniform"/"uniformBuffer"), `binding`, `set`, `stageVisibility`. GLSL non-sampler bindings are reported as standalone `"uniform"` declarations; WGSL `var<uniform>` bindings are reported as `"uniformBuffer"`. Synthesized sampler bindings for texture bindings are included (WGSL) with the binding actually emitted by codegen.
+- `uniforms`: uniform declarations with `name`, `type`, `offset`, `size`. GLSL standalone uniforms each have `offset: 0`; WGSL uniform buffers are sized using WGSL uniform address-space layout rules.
 
 ### Backend capability enforcement
 
 Backends reject unsupported features with structured diagnostics instead of silently narrowing types:
-- `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `WGSL_UNSUPPORTED_RESOURCE`
+- `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `WGSL_UNSUPPORTED_RESOURCE`, `WGSL_UNSUPPORTED_MATRIX`
 - `GLSL_UNSUPPORTED_SCALAR`, `GLSL_UNSUPPORTED_STAGE`, `GLSL_UNSUPPORTED_RESOURCE`
 
 Validation checks shader stages, scalar types, and resource kinds against each backend's `BackendCapabilities`.

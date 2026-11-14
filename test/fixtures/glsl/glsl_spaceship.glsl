@@ -4,6 +4,6 @@
 out vec4 fragColor;
 
 void main() {
-  int a = (1 <=> 2);
+  int a = ((1 < 2) ? -1 : ((1 > 2) ? 1 : 0));
   fragColor = vec4(1.0, 0.0, 0.0, 1.0);
 }

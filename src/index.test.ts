@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { compile, compileAsync } from "../src/index";
 import { NodeFileSourceResolver } from "../src/node/resolver";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "fs";
+import { MemorySourceResolver } from "../src/modules/resolver";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -259,8 +260,25 @@ describe("compile API", () => {
       file: "test.gl",
     });
     expect(result.diagnostics).toEqual([]);
-    expect(result.code).toContain("#version 300 es");
+    expect(result.code?.startsWith("#version 300 es\nprecision mediump float;")).toBe(true);
     expect(result.code).toContain("out vec4 fragColor;");
+  });
+
+  it("omits GLSL 4.50 uniform binding layouts in GLSL ES 3.00", () => {
+    const result = compile({
+      source: `
+        @binding(0) uniform tex: sampler2D
+        fn main(): vec4 {
+          let uv: vec2 = vec2(0.5, 0.5)
+          return texture(tex, uv)
+        }
+      `,
+      target: "glsl-es-300",
+      file: "test.gl",
+    });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.code).toContain("uniform sampler2D tex;");
+    expect(result.code).not.toContain("layout(binding");
   });
 
   it("rejects unsupported types in GLSL ES 3.00", () => {
@@ -347,8 +365,9 @@ describe("compile API", () => {
         file: "test.gl",
       });
       expect(result.diagnostics).toEqual([]);
-      expect(result.code).toContain("out vec4 gl_Position;");
+      expect(result.code).not.toContain("out vec4 gl_Position;");
       expect(result.code).toContain("void main() {");
+      expect(result.code).toContain("gl_Position = vec4(0.0, 0.0, 0.0, 1.0);");
     });
 
     it("compiles vertex stage to WGSL", () => {
@@ -459,6 +478,23 @@ describe("compile API", () => {
   });
 
   describe("resolver path containment", () => {
+    it("attributes imported diagnostics to the imported module", async () => {
+      const resolver = new MemorySourceResolver();
+      resolver.set("main.gl", `import "./lib.gl"\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`);
+      resolver.set("lib.gl", `fn bad(): i8 { return 1 }`);
+      const result = await compileAsync({
+        source: resolver.get("main.gl")!.source,
+        target: "wgsl",
+        sourceId: "main.gl",
+        file: "main.gl",
+        resolver,
+      });
+      expect(result.code).toBeNull();
+      const unsupported = result.diagnostics.find((d) => d.code === "WGSL_UNSUPPORTED_SCALAR");
+      expect(unsupported).toBeDefined();
+      expect(unsupported!.file).toBe("lib.gl");
+    });
+
     it("allows valid nested imports within root", async () => {
       const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
       try {
@@ -480,6 +516,68 @@ describe("compile API", () => {
         expect(result.code).toContain("struct Color {");
       } finally {
         rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("allows filenames beginning with .. inside the root", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
+      try {
+        writeFileSync(join(dir, "..config.gl"), `struct Config { f32 value }`);
+        const resolver = new NodeFileSourceResolver(dir);
+        const result = await compileAsync({
+          source: `import "./..config.gl"\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+          target: "glsl",
+          sourceId: join(dir, "main.gl"),
+          file: join(dir, "main.gl"),
+          resolver,
+        });
+        expect(result.diagnostics).toEqual([]);
+        expect(result.code).toContain("struct Config {");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("allows nested imports across multiple directories", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
+      try {
+        mkdirSync(join(dir, "a", "b"), { recursive: true });
+        writeFileSync(join(dir, "a", "b", "types.gl"), `struct Nested { f32 value }`);
+        writeFileSync(join(dir, "a", "mid.gl"), `import "./b/types.gl"`);
+        const resolver = new NodeFileSourceResolver(dir);
+        const result = await compileAsync({
+          source: `import "./a/mid.gl"\nfn main(): vec4 { let n: Nested = { .value = 1.0 }; return vec4(n.value, 0.0, 0.0, 1.0) }`,
+          target: "glsl",
+          sourceId: join(dir, "main.gl"),
+          file: join(dir, "main.gl"),
+          resolver,
+        });
+        expect(result.diagnostics).toEqual([]);
+        expect(result.code).toContain("struct Nested {");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(process.platform === "win32")("rejects imports escaping root through a symlink", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gl-test-"));
+      const outsideDir = mkdtempSync(join(tmpdir(), "gl-outside-"));
+      try {
+        writeFileSync(join(outsideDir, "secret.gl"), `struct Secret { f32 x }`);
+        symlinkSync(outsideDir, join(dir, "link"), "dir");
+        const resolver = new NodeFileSourceResolver(dir);
+        const result = await compileAsync({
+          source: `import "./link/secret.gl"\nfn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
+          target: "glsl",
+          sourceId: join(dir, "main.gl"),
+          file: join(dir, "main.gl"),
+          resolver,
+        });
+        expect(result.code).toBeNull();
+        expect(result.diagnostics.length).toBeGreaterThan(0);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outsideDir, { recursive: true, force: true });
       }
     });
 

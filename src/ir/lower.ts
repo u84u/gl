@@ -423,7 +423,11 @@ function lowerImplBlock(i: ImplBlock): IRImplBlock {
 /* Program lowering                                                   */
 /* ------------------------------------------------------------------ */
 
-export function lowerProgram(ast: Program, sourceId: string): IRModule {
+export function lowerProgram(
+  ast: Program,
+  sourceId: string,
+  provenance?: Map<Statement, string>,
+): IRModule {
   const items: IRModuleItem[] = [];
   const functions: IRFnDecl[] = [];
   const structs: IRStructDecl[] = [];
@@ -437,50 +441,59 @@ export function lowerProgram(ast: Program, sourceId: string): IRModule {
   const entryPoints: IREntryPoint[] = [];
 
   for (const stmt of ast.statements) {
+    let item: IRModuleItem;
     if (isFnDecl(stmt)) {
       const fn = lowerFnDecl(stmt);
       functions.push(fn);
-      items.push(fn);
+      item = fn;
       if (stmt.name === "main") {
         entryPoints.push({ stage: fn.stage, name: "main", fn });
       }
     } else if (isStructDecl(stmt)) {
       const s = lowerStructDecl(stmt);
       structs.push(s);
-      items.push(s);
+      item = s;
     } else if (isEnumDecl(stmt)) {
       const e = lowerEnumDecl(stmt);
       enums.push(e);
-      items.push(e);
+      item = e;
     } else if (isBindingDecl(stmt)) {
       const b = lowerBindingDecl(stmt);
       bindings.push(b);
-      items.push(b);
+      item = b;
     } else if (isTypeAlias(stmt)) {
       const t = lowerTypeAlias(stmt);
       typeAliases.push(t);
-      items.push(t);
+      item = t;
     } else if (isNewtypeDecl(stmt)) {
       const n = lowerNewtype(stmt);
       newtypes.push(n);
-      items.push(n);
+      item = n;
     } else if (isOpaqueDecl(stmt)) {
       const o = lowerOpaque(stmt);
       opaques.push(o);
-      items.push(o);
+      item = o;
     } else if (isTraitDecl(stmt)) {
       const t = lowerTrait(stmt);
       traits.push(t);
-      items.push(t);
+      item = t;
     } else if (isImplBlock(stmt)) {
       const i = lowerImplBlock(stmt);
       impls.push(i);
-      items.push(i);
+      item = i;
     } else {
       // Top-level executable statements and other legal constructs.
-      const lowered = lowerStatement(stmt);
-      items.push(lowered);
+      item = lowerStatement(stmt);
     }
+
+    const sourceFile = provenance?.get(stmt);
+    if (sourceFile) item.sourceFile = sourceFile;
+    items.push(item);
+  }
+
+  const sourceFileIds = new Set<string>([sourceId]);
+  for (const item of items) {
+    if (item.sourceFile) sourceFileIds.add(item.sourceFile);
   }
 
   return {
@@ -495,7 +508,7 @@ export function lowerProgram(ast: Program, sourceId: string): IRModule {
     traits,
     impls,
     entryPoints,
-    sourceFiles: [{ id: sourceId, displayName: sourceId }],
+    sourceFiles: Array.from(sourceFileIds, (id) => ({ id, displayName: id })),
     sourceId,
     span: spanOf(ast),
   };

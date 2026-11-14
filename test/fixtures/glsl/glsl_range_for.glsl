@@ -5,7 +5,7 @@ out vec4 fragColor;
 
 void main() {
   int i = 0;
-  for (int __loop_var = 0; __loop_var < 3; __loop_var++) {
+  for (int loopIndex = 0; loopIndex < 3; loopIndex++) {
     (i = i + 1);
   }
   fragColor = vec4(1.0, 0.0, 0.0, 1.0);

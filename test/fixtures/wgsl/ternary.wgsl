@@ -3,6 +3,6 @@
 @fragment
 fn main() -> @location(0) vec4<f32> {
   let b: bool = true;
-  let x: f32 = (b ? 1.0 : 2.0);
+  let x: f32 = select(2.0, 1.0, b);
   return vec4<f32>(x, 0.0, 0.0, 1.0);
 }

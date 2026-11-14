@@ -16,7 +16,13 @@ import {
   ShaderInterfaceVariable,
   defaultRegistry,
 } from "./backend";
-import { validateGLSLModuleIR, generateGLSLFromIR, glslType } from "./glsl";
+import {
+  validateGLSLModuleIR,
+  generateGLSLFromIR,
+  glslType,
+  glslUniformLayout,
+  glslStructMap,
+} from "./glsl";
 
 export class GlslEs300Backend implements ShaderCodegenBackend {
   readonly id: ShaderTarget = "glsl-es-300";
@@ -71,8 +77,14 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
       if (versionIdx !== -1) {
         lines.splice(versionIdx + 1, 0, "precision mediump float;");
         lines.splice(versionIdx + 2, 0, "");
+        // GLSL ES requires #version on the first line, so move generated
+        // comments that precede it below the version and precision lines.
+        const preceding = lines.splice(0, versionIdx);
+        lines.splice(2, 0, ...preceding);
       }
       code = lines.join("\n");
+      // GLSL ES 3.00 has no explicit uniform binding layout qualifier.
+      code = code.replace(/^layout\(binding = \d+\) uniform /gm, "uniform ");
     } catch (err) {
       diagnostics.push({
         file: _file,
@@ -89,29 +101,27 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
           s.kind === "fn" && s.name === "main",
       );
       const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
+      const structs = glslStructMap(module);
       const resources: ShaderResourceReflection[] = [];
       const uniforms: ShaderUniformReflection[] = [];
-      let uniformOffset = 0;
       for (const b of module.items) {
         if (b.kind !== "binding") continue;
         const isSampler = b.type.kind === "sampler";
         resources.push({
           name: b.name,
-          kind: isSampler ? "sampler" : "uniformBuffer",
+          kind: isSampler ? "sampler" : "uniform",
           binding: b.binding,
           set: 0,
           stageVisibility: [stage],
         });
         if (!isSampler) {
-          const typeName = glslType(b.type);
-          const size = typeName === "float" || typeName === "int" || typeName === "uint" || typeName === "bool" ? 4 : 16;
+          const layout = glslUniformLayout(b.type, structs);
           uniforms.push({
             name: b.name,
-            type: typeName,
-            offset: uniformOffset,
-            size,
+            type: glslType(b.type),
+            offset: 0,
+            size: layout.size,
           });
-          uniformOffset += size;
         }
       }
       const inputs = mainStmt

@@ -137,7 +137,7 @@ describe("AST builder API", () => {
 
     const wgsl = compileAst(program, "wgsl");
     expect(wgsl).toContain("while (i < 5) {");
-    expect(wgsl).toContain("(i = i + 1)");
+    expect(wgsl).toContain("i = i + 1;");
   });
 
   it("compiles range-based for loops", () => {
@@ -252,7 +252,7 @@ describe("AST builder API", () => {
     ]);
 
     const wgsl = compileAst(program, "wgsl");
-    expect(wgsl).toContain("let result: f32;");
+    expect(wgsl).toContain("var result: f32;");
     expect(wgsl).toContain("result = 10.0;");
     expect(wgsl).toContain("result = 0.0;");
   });

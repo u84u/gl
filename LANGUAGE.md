@@ -4,8 +4,8 @@ A statically-typed shading language that transpiles to GLSL (450 core, ES 3.00) 
 
 ## Types
 
-Scalars: `i32`, `u32`, `f32`, `f64`, `bool` (plus `i8`/`u8`/`i16`/`u16`/`i64`/`u64`/`f16`/`bf16` — backend-dependent support)
-Vectors: `vec2`, `vec3`, `vec4`
+Scalars: `i32`, `u32`, `f32`, `f64`, `bool` (plus `i8`/`u8`/`i16`/`u16`/`i64`/`u64`/`f16`/`bf16` — backend-dependent support; WGSL supports `i32`/`u32`/`f32`/`f16`/`bool` and rejects the rest)
+Vectors: `vec2`, `vec3`, `vec4` (WGSL emits `vecN<T>`, e.g. `vec3<i32>`; shaders using `f16` emit `enable f16;`)
 Matrices: `mat2`, `mat3`, `mat4`, `dmat3`, `dmat4`
 Samplers: `sampler2D`, `sampler3D`, `samplerCube`, etc.
 Structs: `struct Color { f32 r, f32 g, f32 b, f32 a }`
@@ -35,7 +35,7 @@ Compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>
 
 `@fragment fn main()` — default stage. Returns `vec4` → `out vec4 fragColor` (GLSL) / `@location(0) vec4<f32>` (WGSL).
 
-`@vertex fn main()` — returns `vec4` → `out vec4 gl_Position` (GLSL) / `@builtin(position) vec4<f32>` (WGSL).
+`@vertex fn main()` — returns `vec4` → writes the built-in `gl_Position` (GLSL, no `out` declaration) / `@builtin(position) vec4<f32>` (WGSL).
 
 `@compute fn main()` — no return → `void main()` (GLSL) / `fn main()` (WGSL) with `@workgroup_size(1, 1, 1)`.
 

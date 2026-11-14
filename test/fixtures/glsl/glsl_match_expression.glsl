@@ -5,6 +5,15 @@ out vec4 fragColor;
 
 void main() {
   int x = 1;
-  float result = (if ((x == 1)) { 10.0; } if ((x == 2)) { 20.0; } if (true) { 0.0; });
+  float result;
+  if ((x == 1)) {
+    result = 10.0;
+  }
+  else if ((x == 2)) {
+    result = 20.0;
+  }
+  else {
+    result = 0.0;
+  }
   fragColor = vec4(result, 0.0, 0.0, 1.0);
 }

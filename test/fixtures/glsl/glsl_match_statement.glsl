@@ -5,6 +5,14 @@ out vec4 fragColor;
 
 void main() {
   int x = 1;
-  (if ((x == 1)) { return vec4(1.0, 0.0, 0.0, 1.0); } if ((x == 2)) { return vec4(0.0, 1.0, 0.0, 1.0); } if (true) { return vec4(0.0, 0.0, 1.0, 1.0); });
+  if ((x == 1)) {
+    fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+  }
+  else if ((x == 2)) {
+    fragColor = vec4(0.0, 1.0, 0.0, 1.0);
+  }
+  else {
+    fragColor = vec4(0.0, 0.0, 1.0, 1.0);
+  }
   fragColor = vec4(0.0, 0.0, 0.0, 1.0);
 }
