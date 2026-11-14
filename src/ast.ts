@@ -50,6 +50,7 @@ import type {
   NewtypeDecl,
   OpaqueDecl,
   ImplBlock,
+  Span,
 } from "./types";
 import { literal } from "./types";
 import type { ShaderStage } from "./codegen/capabilities";
@@ -486,7 +487,7 @@ export function structDecl(name: string, fields: Field[]): StructDecl {
  */
 export function enumDecl(
   name: string,
-  variants: { name: string; type: Type | null }[],
+  variants: { name: string; type: Type | null; span?: Span }[],
 ): EnumDecl {
   return { kind: "EnumDecl", name, variants, span: DEFAULT_SPAN };
 }

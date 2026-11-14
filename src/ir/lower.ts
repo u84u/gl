@@ -319,13 +319,13 @@ function lowerInit(init: VarDecl | ExpressionStmt): IRVarDecl | IRExpressionStmt
   return { kind: "expressionStmt", expression: lowerExpression(init.expression), span: spanOf(init) };
 }
 
-function lowerForRange(range: { variable: string; start: Expression; end: Expression; inclusive: boolean }): IRForRange {
+function lowerForRange(range: { variable: string; start: Expression; end: Expression; inclusive: boolean; span?: IRSpan }): IRForRange {
   return {
     variable: range.variable,
     start: lowerExpression(range.start),
     end: lowerExpression(range.end),
     inclusive: range.inclusive,
-    span: { line: 1, column: 1 },
+    span: range.span,
   };
 }
 

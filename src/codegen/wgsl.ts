@@ -50,6 +50,8 @@ import {
   isDiscardStmt,
   isTypeAlias,
   isNewtypeDecl,
+  isTraitDecl,
+  isImplBlock,
   isProgram,
 } from "../types";
 import { Diagnostic, diagnostic } from "../typechecker";
@@ -58,7 +60,6 @@ import {
   ShaderTarget,
   WGSL_CAPABILITIES,
   scalarIsSupported,
-  ScalarTypeName,
 } from "./capabilities";
 import {
   ShaderCodegenBackend,
@@ -214,7 +215,7 @@ export function validateWGSLModule(
       if (seen.has(nt)) continue;
       seen.add(nt);
       if (isScalar(nt)) {
-        const name = nt.name as ScalarTypeName;
+        const name = nt.name;
         if (!scalarIsSupported(capabilities, name)) {
           diagnostics.push(
             diagnostic(
@@ -269,6 +270,23 @@ export function validateWGSLModule(
       }
       if (isNewtypeDecl(stmt)) {
         checkType(stmt.innerType, stmt.span);
+      }
+      if (isTraitDecl(stmt)) {
+        for (const method of stmt.methods) {
+          for (const param of method.params) {
+            checkType(param.type, stmt.span);
+          }
+          checkType(method.returnType, stmt.span);
+        }
+      }
+      if (isImplBlock(stmt)) {
+        checkType(stmt.type, stmt.span);
+        for (const method of stmt.methods) {
+          for (const param of method.params) {
+            checkType(param.type, stmt.span);
+          }
+          checkType(method.returnType, stmt.span);
+        }
       }
       if (isBlock(stmt)) {
         walkStatements(stmt.statements);

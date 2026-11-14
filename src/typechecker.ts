@@ -202,8 +202,7 @@ function concretize(abstractType: Type, targetType: Type): Type {
       return targetType;
     }
     if (isVector(targetType)) {
-      const v = targetType as Extract<Type, { kind: "vector" }>;
-      return { kind: "scalar", name: v.element === "bool" ? "i32" : v.element };
+      return { kind: "scalar", name: targetType.element === "bool" ? "i32" : targetType.element };
     }
     throw new Error(`Cannot concretize abstract int to ${typeName(targetType)}`);
   }
@@ -226,12 +225,11 @@ function concretize(abstractType: Type, targetType: Type): Type {
       targetType.element !== "i64" &&
       targetType.element !== "u64"
     ) {
-      const v = targetType as Extract<Type, { kind: "vector" }>;
-      return { kind: "scalar", name: v.element };
+      return { kind: "scalar", name: targetType.element };
     }
     throw new Error(`Cannot concretize abstract float to ${typeName(targetType)}`);
   }
-  return abstractType;
+  throw new Error(`Cannot concretize abstract type ${typeName(abstractType)} to ${typeName(targetType)}`);
 }
 
 /**

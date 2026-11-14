@@ -373,7 +373,7 @@ export interface ForStmt {
   init: VarDecl | ExpressionStmt | null;
   condition: Expression | null;
   increment: Expression | null;
-  range: { variable: string; start: Expression; end: Expression; inclusive: boolean } | null;
+  range: { variable: string; start: Expression; end: Expression; inclusive: boolean; span?: Span } | null;
   body: Block;
   span: Span;
 }

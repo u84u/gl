@@ -197,7 +197,7 @@ export class Parser {
     const startSpan = this.spanOf(enumToken);
     const name = this.consume("Ident", "Expect enum name after 'enum'.");
     this.consume("LBrace", "Expect '{' before enum body.");
-    const variants: { name: string; type: Type | null }[] = [];
+    const variants: { name: string; type: Type | null; span?: Span }[] = [];
     while (!this.check("RBrace") && !this.isAtEnd()) {
       const variantName = this.consume("Ident", "Expect variant name.");
       let variantType: Type | null = null;
@@ -205,7 +205,7 @@ export class Parser {
         variantType = this.type();
         this.consume("RParen", "Expect ')' after variant type.");
       }
-      variants.push({ name: variantName.lexeme, type: variantType });
+      variants.push({ name: variantName.lexeme, type: variantType, span: { line: variantName.line, column: variantName.column } });
       if (!this.check("RBrace")) {
         this.consume("Comma", "Expect ',' after variant.");
       }
@@ -406,7 +406,7 @@ export class Parser {
         init: null,
         condition: null,
         increment: null,
-        range: { variable, start, end, inclusive },
+        range: { variable, start, end, inclusive, span: start.span ?? end.span },
         body,
         span: startSpan,
       };

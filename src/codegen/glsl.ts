@@ -62,7 +62,6 @@ import {
   ShaderTarget,
   GLSL_450_CAPABILITIES,
   scalarIsSupported,
-  ScalarTypeName,
 } from "./capabilities";
 import {
   ShaderCodegenBackend,
@@ -881,7 +880,7 @@ export function validateGLSLModule(
       if (seen.has(nt)) continue;
       seen.add(nt);
       if (isScalar(nt)) {
-        const name = nt.name as ScalarTypeName;
+        const name = nt.name;
         if (!scalarIsSupported(capabilities, name)) {
           diagnostics.push(
             diagnostic(
@@ -997,8 +996,7 @@ export class GlslBackend implements ShaderCodegenBackend {
     let code: string | null = null;
 
     try {
-      const target = this.id === "glsl" ? "glsl-450" : this.id;
-      code = generateGLSL(program, target as "glsl-450" | "glsl-es-300");
+      code = generateGLSL(program, "glsl-450");
     } catch (err) {
       diagnostics.push({
         file: _file,

@@ -47,6 +47,13 @@ import {
   isPanicStmt,
   isUnreachableStmt,
   isDiscardStmt,
+  isTypeAlias,
+  isNewtypeDecl,
+  isOpaqueDecl,
+  isEnumDecl,
+  isTraitDecl,
+  isImplBlock,
+  assertNever,
 } from "./types";
 
 // Vector type prefix map shared between formatter and codegen.
@@ -360,8 +367,28 @@ function formatStatement(stmt: Statement, indent: number): string {
   if (isDiscardStmt(stmt)) {
     return `${pad}discard;`;
   }
-  // TypeAlias, NewtypeDecl, OpaqueDecl, EnumDecl, ImplBlock, TraitDecl — no output
-  return "";
+  if (isTypeAlias(stmt)) {
+    return `${pad}type ${stmt.name} = ${formatType(stmt.type)};`;
+  }
+  if (isNewtypeDecl(stmt)) {
+    return `${pad}struct ${stmt.name}(${formatType(stmt.innerType)});`;
+  }
+  if (isOpaqueDecl(stmt)) {
+    return `${pad}opaque ${stmt.name};`;
+  }
+  if (isEnumDecl(stmt)) {
+    const variants = stmt.variants.map((v) =>
+      v.type ? `${v.name}(${formatType(v.type)})` : v.name
+    ).join(", ");
+    return `${pad}enum ${stmt.name} { ${variants} };`;
+  }
+  if (isTraitDecl(stmt)) {
+    return `${pad}trait ${stmt.name} { ... };`;
+  }
+  if (isImplBlock(stmt)) {
+    return `${pad}impl ${stmt.type} for ${stmt.trait} { ... };`;
+  }
+  return assertNever(stmt);
 }
 
 /**

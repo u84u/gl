@@ -330,12 +330,13 @@ function raiseInit(init: IRVarDecl | IRExpressionStmt): VarDecl | ExpressionStmt
   return { kind: "ExpressionStmt", expression: raiseExpression(init.expression), span: spanOf(init) };
 }
 
-function raiseForRange(range: IRForRange): { variable: string; start: Expression; end: Expression; inclusive: boolean } {
+function raiseForRange(range: IRForRange): { variable: string; start: Expression; end: Expression; inclusive: boolean; span?: Span } {
   return {
     variable: range.variable,
     start: raiseExpression(range.start),
     end: raiseExpression(range.end),
     inclusive: range.inclusive,
+    ...(range.span ? { span: range.span } : {}),
   };
 }
 
