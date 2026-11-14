@@ -11,6 +11,8 @@ export class FetchSourceResolver implements SourceResolver {
   constructor(
     /** Base URL used to resolve relative import specifiers. */
     public readonly baseUrl: string,
+    /** Optional fetch implementation (defaults to global fetch). */
+    private readonly fetchFn: typeof fetch = fetch,
   ) {}
 
   async resolve(specifier: string, importer: SourceModule): Promise<SourceModule> {
@@ -19,7 +21,7 @@ export class FetchSourceResolver implements SourceResolver {
 
     let response: Response;
     try {
-      response = await fetch(resolvedUrl.href);
+      response = await this.fetchFn(resolvedUrl.href);
     } catch (err) {
       throw new Error(
         `Failed to fetch imported module "${specifier}" from ${resolvedUrl.href}: ${

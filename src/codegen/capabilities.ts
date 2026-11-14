@@ -4,7 +4,7 @@ export type ScalarTypeName =
 
 export type ShaderStage = "vertex" | "fragment" | "compute";
 
-export type ShaderTarget = "wgsl" | "glsl-es-300" | "glsl-450" | "glsl";
+export type ShaderTarget = "wgsl" | "glsl-es-300" | "glsl-450" | "glsl" | (string & {});
 
 export type ResourceKind =
   | "uniformBuffer"
@@ -14,7 +14,7 @@ export type ResourceKind =
   | "sampler";
 
 export interface BackendCapabilities {
-  readonly id: ShaderTarget;
+  readonly id: string;
   readonly version: string;
   readonly shaderStages: ReadonlySet<ShaderStage>;
   readonly scalarTypes: ReadonlySet<ScalarTypeName>;
@@ -58,7 +58,7 @@ export const GLSL_450_CAPABILITIES: BackendCapabilities = {
   shaderStages: new Set(["vertex", "fragment", "compute"]),
   scalarTypes: new Set([
     "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
-    "f16", "f32", "f64", "bf16", "bool",
+    "f32", "f64", "bool",
   ]),
   resourceKinds: new Set([
     "uniformBuffer", "storageBuffer", "sampledTexture", "storageTexture", "sampler",
@@ -79,6 +79,8 @@ export function capabilitiesFor(target: ShaderTarget): BackendCapabilities {
     case "glsl-450":
     case "glsl":
       return GLSL_450_CAPABILITIES;
+    default:
+      throw new Error(`No built-in capabilities for target '${target}'`);
   }
 }
 

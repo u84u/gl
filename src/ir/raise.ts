@@ -9,7 +9,7 @@ import {
   IRModule, IRType, IRExpression, IRStatement, IRFnDecl, IRStructDecl,
   IRBindingDecl, IRVarDecl, IRExpressionStmt, IRBlock, IRForRange,
   IRMatchArm, IRPattern, IREnumDecl, IRTypeAlias, IRNewtypeDecl,
-  IROpaqueDecl, IRTraitDecl, IRImplBlock, IRScalarName, IRSpan,
+  IROpaqueDecl, IRTraitDecl, IRImplBlock, IRModuleItem, IRSpan,
 } from "./shader-ir";
 
 /* ------------------------------------------------------------------ */
@@ -29,7 +29,13 @@ function raiseType(t: IRType): Type {
     const name = t.name as string;
     if (name === "abstractInt") return { kind: "abstractInt" };
     if (name === "abstractFloat") return { kind: "abstractFloat" };
-    return { kind: "scalar", name: name as IRScalarName };
+    return { kind: "scalar", name: name as Extract<Type, { kind: "scalar" }>["name"] };
+  }
+  if (t.kind === "enum") {
+    return { kind: "enum", name: t.name };
+  }
+  if (t.kind === "quaternion") {
+    return { kind: "quaternion" };
   }
   if (t.kind === "vector") {
     return { kind: "vector", element: t.element, size: t.size } as Type;
@@ -116,7 +122,7 @@ function raiseExpression(e: IRExpression): Expression {
   if (e.kind === "call") {
     return {
       kind: "CallExpr",
-      callee: { kind: "Identifier", name: e.callee, span: baseSpan },
+      callee: raiseExpression(e.callee),
       args: e.args.map(raiseExpression),
       span: baseSpan,
     };
@@ -236,10 +242,19 @@ function raisePattern(p: IRPattern): Pattern {
 /* ------------------------------------------------------------------ */
 
 function raiseBlock(b: IRBlock): Block {
-  return { kind: "Block", statements: b.statements.map(raiseStatement), span: spanOf(b) };
+  return { kind: "Block", statements: b.statements.map((item) => raiseStatement(item as IRModuleItem)), span: spanOf(b) };
 }
 
-function raiseStatement(s: IRStatement): Statement {
+function raiseStatement(s: IRModuleItem): Statement {
+  if (s.kind === "struct") return raiseStructDecl(s as any);
+  if (s.kind === "fn") return raiseFnDecl(s as any);
+  if (s.kind === "binding") return raiseBindingDecl(s as any);
+  if (s.kind === "enum") return raiseEnumDecl(s as any);
+  if (s.kind === "typeAlias") return raiseTypeAlias(s as any);
+  if (s.kind === "newtype") return raiseNewtype(s as any);
+  if (s.kind === "opaqueDecl") return raiseOpaque(s as any);
+  if (s.kind === "trait") return raiseTrait(s as any);
+  if (s.kind === "implBlock") return raiseImplBlock(s as any);
   if (s.kind === "varDecl") {
     return {
       kind: "VarDecl",
@@ -444,32 +459,39 @@ function raiseImplBlock(i: IRImplBlock): ImplBlock {
 
 export function raiseProgram(module: IRModule): Program {
   const statements: Statement[] = [];
-  for (const fn of module.functions) {
-    statements.push(raiseFnDecl(fn));
-  }
-  for (const s of module.structs) {
-    statements.push(raiseStructDecl(s));
-  }
-  for (const e of module.enums) {
-    statements.push(raiseEnumDecl(e));
-  }
-  for (const b of module.bindings) {
-    statements.push(raiseBindingDecl(b));
-  }
-  for (const t of module.typeAliases) {
-    statements.push(raiseTypeAlias(t));
-  }
-  for (const n of module.newtypes) {
-    statements.push(raiseNewtype(n));
-  }
-  for (const o of module.opaques) {
-    statements.push(raiseOpaque(o));
-  }
-  for (const t of module.traits) {
-    statements.push(raiseTrait(t));
-  }
-  for (const i of module.impls) {
-    statements.push(raiseImplBlock(i));
+  for (const item of module.items) {
+    switch (item.kind) {
+      case "struct":
+        statements.push(raiseStructDecl(item));
+        break;
+      case "enum":
+        statements.push(raiseEnumDecl(item));
+        break;
+      case "fn":
+        statements.push(raiseFnDecl(item));
+        break;
+      case "binding":
+        statements.push(raiseBindingDecl(item));
+        break;
+      case "typeAlias":
+        statements.push(raiseTypeAlias(item));
+        break;
+      case "newtype":
+        statements.push(raiseNewtype(item));
+        break;
+      case "opaqueDecl":
+        statements.push(raiseOpaque(item));
+        break;
+      case "trait":
+        statements.push(raiseTrait(item));
+        break;
+      case "implBlock":
+        statements.push(raiseImplBlock(item));
+        break;
+      default:
+        statements.push(raiseStatement(item as IRStatement));
+        break;
+    }
   }
   return { kind: "Program", statements, span: spanOf(module) };
 }

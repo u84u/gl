@@ -1,6 +1,7 @@
 export type IRScalarName =
   | "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64"
-  | "f16" | "f32" | "f64" | "bf16" | "bool";
+  | "f16" | "f32" | "f64" | "bf16" | "bool"
+  | "abstractInt" | "abstractFloat";
 
 export type IRStage = "vertex" | "fragment" | "compute";
 
@@ -31,6 +32,8 @@ export type IRType =
   | IRMatrix
   | IRArray
   | IRStructRef
+  | IREnumRef
+  | IRQuaternion
   | IRSampler
   | IRAlias
   | IROpaque
@@ -71,6 +74,17 @@ export interface IRArray {
 export interface IRStructRef {
   kind: "struct";
   name: string;
+  span?: IRSpan;
+}
+
+export interface IREnumRef {
+  kind: "enum";
+  name: string;
+  span?: IRSpan;
+}
+
+export interface IRQuaternion {
+  kind: "quaternion";
   span?: IRSpan;
 }
 
@@ -185,7 +199,7 @@ export interface IRUnary {
 
 export interface IRCall {
   kind: "call";
-  callee: string;
+  callee: IRExpression;
   args: IRExpression[];
   span?: IRSpan;
 }
@@ -340,7 +354,7 @@ export interface IRExpressionStmt {
 
 export interface IRBlock {
   kind: "block";
-  statements: IRStatement[];
+  statements: IRModuleItem[];
   span?: IRSpan;
 }
 
@@ -505,7 +519,25 @@ export interface IREntryPoint {
   fn: IRFnDecl;
 }
 
+export interface IRSourceFile {
+  id: string;
+  displayName?: string;
+}
+
+export type IRModuleItem =
+  | IRStructDecl
+  | IREnumDecl
+  | IRFnDecl
+  | IRBindingDecl
+  | IRTypeAlias
+  | IRNewtypeDecl
+  | IROpaqueDecl
+  | IRTraitDecl
+  | IRImplBlock
+  | IRStatement;
+
 export interface IRModule {
+  items: IRModuleItem[];
   functions: IRFnDecl[];
   structs: IRStructDecl[];
   enums: IREnumDecl[];
@@ -516,6 +548,7 @@ export interface IRModule {
   traits: IRTraitDecl[];
   impls: IRImplBlock[];
   entryPoints: IREntryPoint[];
+  sourceFiles: IRSourceFile[];
   sourceId: string;
   span?: IRSpan;
 }

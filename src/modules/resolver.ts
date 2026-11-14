@@ -24,10 +24,25 @@ export class MemorySourceResolver implements SourceResolver {
   }
 
   async resolve(specifier: string, importer: SourceModule): Promise<SourceModule> {
-    const module = this.modules.get(specifier);
+    let resolvedId = specifier;
+    if (specifier.startsWith("./") || specifier.startsWith("../")) {
+      const baseSegments = importer.id.split("/");
+      baseSegments.pop();
+      const specSegments = specifier.split("/");
+      for (const seg of specSegments) {
+        if (seg === "" || seg === ".") continue;
+        if (seg === "..") {
+          baseSegments.pop();
+        } else {
+          baseSegments.push(seg);
+        }
+      }
+      resolvedId = baseSegments.join("/");
+    }
+    const module = this.modules.get(resolvedId);
     if (!module) {
       throw new Error(
-        `Module not found in memory resolver: ${specifier} (imported from ${importer.displayName})`,
+        `Module not found in memory resolver: ${specifier} (resolved '${resolvedId}', imported from ${importer.displayName})`,
       );
     }
     return module;

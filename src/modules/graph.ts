@@ -17,6 +17,7 @@ export interface ModuleGraphOptions {
 export interface CollectedProgram {
   statements: Statement[];
   registry: ModuleRegistry;
+  provenance: Map<Statement, string>;
 }
 
 async function collectFromSource(
@@ -25,6 +26,7 @@ async function collectFromSource(
   visited: Set<string>,
   registry: ModuleRegistry,
   allStatements: Statement[],
+  provenance: Map<Statement, string>,
   isMainFile: boolean,
   resolver: SourceResolver,
 ): Promise<void> {
@@ -59,6 +61,7 @@ async function collectFromSource(
       visited,
       registry,
       allStatements,
+      provenance,
       false,
       resolver,
     );
@@ -69,6 +72,7 @@ async function collectFromSource(
     if (stmt.kind === "FnDecl") {
       if (!isMainFile && stmt.name === "main") continue;
       if (registry.set(stmt, stmt.name)) {
+        provenance.set(stmt, sourceId);
         allStatements.push(stmt);
       }
     } else if (
@@ -81,17 +85,20 @@ async function collectFromSource(
       stmt.kind === "OpaqueDecl"
     ) {
       if (registry.set(stmt, stmt.name)) {
+        provenance.set(stmt, sourceId);
         allStatements.push(stmt);
       }
     } else if (stmt.kind === "ImplBlock") {
       const typeKey =
         stmt.type.kind === "struct" ? stmt.type.name : JSON.stringify(stmt.type);
       if (registry.set(stmt, typeKey)) {
+        provenance.set(stmt, sourceId);
         allStatements.push(stmt);
       }
     } else {
       // Top-level executable statements (VarDecl, ReturnStmt, etc.)
-      allStatements.push(stmt);
+      provenance.set(stmt, sourceId);
+        allStatements.push(stmt);
     }
   }
 }
@@ -102,6 +109,7 @@ export async function collectModuleGraph(
   const { source, sourceId, isMainFile, resolver } = options;
   const registry = new ModuleRegistry();
   const allStatements: Statement[] = [];
+  const provenance = new Map<Statement, string>();
   const visited = new Set<string>();
 
   await collectFromSource(
@@ -110,9 +118,10 @@ export async function collectModuleGraph(
     visited,
     registry,
     allStatements,
+    provenance,
     isMainFile,
     resolver,
   );
 
-  return { statements: allStatements, registry };
+  return { statements: allStatements, registry, provenance };
 }

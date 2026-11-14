@@ -1,11 +1,12 @@
 import { tokenize } from "./lexer";
 import { parse } from "./parser";
 import { typeCheck, Diagnostic } from "./typechecker";
+export type { Diagnostic } from "./typechecker";
 import { generateGLSL } from "./codegen/glsl";
 import { generateWGSL } from "./codegen/wgsl";
 import { lowerProgram } from "./ir/lower";
-import { raiseProgram } from "./ir/raise";
-import { defaultRegistry } from "./codegen/backend";
+import { defaultRegistry, BackendRegistry } from "./codegen/backend";
+import type { ShaderArtifact } from "./codegen/backend";
 import "./codegen/glsl-es-300";
 import "./codegen/glsl";
 import "./codegen/wgsl";
@@ -38,12 +39,30 @@ export {
   program, mainFn, mainVec4,
 } from "./ast";
 export { SourceResolver, SourceModule, MemorySourceResolver } from "./modules/resolver";
+export {
+  BackendRegistry,
+  createDefaultBackendRegistry,
+  defaultRegistry,
+  getBackend,
+  type ShaderCodegenBackend,
+  type CodegenOptions,
+  type BackendOutput,
+  type ShaderArtifact,
+  type ShaderSourceMap,
+  type ShaderReflection,
+  type ShaderEntryPointReflection,
+  type ShaderInterfaceVariable,
+  type ShaderResourceReflection,
+  type ShaderUniformReflection,
+} from "./codegen/backend";
+export * from "./codegen/capabilities";
+export * from "./ir/shader-ir";
 
 /**
  * Options for compiling a gl source file or AST.
  */
 export interface CompileOptions {
-  target: "glsl" | "glsl-es-300" | "glsl-450" | "wgsl";
+  target: string;
   file?: string;
   /** Source text to parse and compile (mutually exclusive with `ast`). */
   source?: string;
@@ -53,28 +72,33 @@ export interface CompileOptions {
   resolver?: SourceResolver;
   /** Stable, canonical identity for the main source (used in diagnostics + module graph). */
   sourceId?: string;
+  /** Optional backend registry (defaults to the shared default registry). */
+  registry?: BackendRegistry;
+  /** Provenance map from statement to source file (used for imported diagnostics). */
+  provenance?: Map<Statement, string>;
 }
 
-export interface CompileSyncOptions<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl" = "glsl" | "glsl-es-300" | "glsl-450" | "wgsl">
-  extends CompileOptions {
-  target: Target;
+export interface CompileSyncOptions extends CompileOptions {
+  target: string;
 }
 
-export interface CompileAsyncOptions<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl" = "glsl" | "glsl-es-300" | "glsl-450" | "wgsl">
-  extends CompileOptions {
-  target: Target;
+export interface CompileAsyncOptions extends CompileOptions {
+  target: string;
   resolver: SourceResolver;
 }
 
 /**
- * Result of compiling a gl source file or AST, indexed by target.
+ * Result of compiling a gl source file or AST.
  */
-export interface CompileResult<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl" = "glsl" | "glsl-es-300" | "glsl-450" | "wgsl"> {
+export interface CompileResult {
   code: string | null;
+  shaders: ShaderArtifact[];
   ast: Program;
   diagnostics: Diagnostic[];
-  target: Target;
+  target: string;
 }
+
+
 
 function formatError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -86,15 +110,17 @@ function formatError(err: unknown): string {
  * Skips parsing and import resolution; runs type checking and code
  * generation directly on the supplied AST.
  */
-function compileProgram<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl">(
+function compileProgram(
   ast: Program,
   file: string,
-  target: Target,
-): CompileResult<Target> {
+  target: string,
+  registry: BackendRegistry = defaultRegistry,
+  provenance?: Map<Statement, string>,
+): CompileResult {
   const diagnostics: Diagnostic[] = [];
 
   try {
-    const typeResult = typeCheck(ast, file);
+    const typeResult = typeCheck(ast, file, provenance);
     diagnostics.push(...typeResult.diagnostics);
   } catch (err) {
     diagnostics.push({
@@ -102,37 +128,35 @@ function compileProgram<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wg
       span: { line: 1, column: 1 },
       message: formatError(err),
     });
-    return { code: null, ast, diagnostics, target } as CompileResult<Target>;
+    return { code: null, shaders: [], ast, diagnostics, target };
   }
 
   const hasErrors = diagnostics.length > 0;
 
   let code: string | null = null;
+  const shaders: ShaderArtifact[] = [];
   if (!hasErrors) {
     try {
-      // Lower the type-checked AST into the backend-independent IR, then
-      // raise it back to an AST for code generation. This round-trip proves
-      // the IR preserves the program and lets existing generators consume IR.
       const ir = lowerProgram(ast, file);
-      const raisedAst = raiseProgram(ir);
 
-      const backend = defaultRegistry.get(target);
+      const backend = registry.get(target);
       if (!backend) {
         throw new Error(`Unknown target: ${target}`);
       }
 
-      const validationDiagnostics = backend.validate(raisedAst, file);
+      const validationDiagnostics = backend.validate(ir, file);
       diagnostics.push(...validationDiagnostics);
       if (validationDiagnostics.some((d) => d.severity === "error")) {
-        return { code: null, ast: raisedAst, diagnostics, target } as CompileResult<Target>;
+        return { code: null, shaders: [], ast, diagnostics, target };
       }
 
-      const output = backend.generate(raisedAst, file);
+      const output = backend.generate(ir, file);
       diagnostics.push(...output.diagnostics);
       if (output.diagnostics.some((d) => d.severity === "error")) {
-        return { code: null, ast: raisedAst, diagnostics, target } as CompileResult<Target>;
+        return { code: null, shaders: output.shaders, ast, diagnostics, target };
       }
 
+      shaders.push(...output.shaders);
       code = output.shaders.length > 0 ? output.shaders[0]!.code : null;
     } catch (err) {
       diagnostics.push({
@@ -140,11 +164,11 @@ function compileProgram<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wg
         span: { line: 1, column: 1 },
         message: formatError(err),
       });
-      return { code: null, ast, diagnostics, target } as CompileResult<Target>;
+      return { code: null, shaders: [], ast, diagnostics, target };
     }
   }
 
-  return { code, ast, diagnostics, target } as CompileResult<Target>;
+  return { code, shaders, ast, diagnostics, target };
 }
 
 /**
@@ -180,15 +204,15 @@ function collectSingleFile(
  * @param options - Compilation options (target, file, and either `source` or `ast`).
  * @returns CompileResult indexed by the target.
  */
-export function compileSync<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl">(
-  options: CompileSyncOptions<Target>,
-): CompileResult<Target> {
+export function compileSync(
+  options: CompileSyncOptions,
+): CompileResult {
   const { target } = options;
   const file = options.file ?? options.sourceId ?? "test.gl";
 
   // AST-based path: skip parsing / imports
   if (options.ast) {
-    return compileProgram(options.ast, file, target);
+    return compileProgram(options.ast, file, target, options.registry, options.provenance);
   }
 
   // Source-based path: parse + typecheck + codegen (no imports supported synchronously)
@@ -196,6 +220,7 @@ export function compileSync<Target extends "glsl" | "glsl-es-300" | "glsl-450" |
   if (!source) {
     return {
       code: null,
+      shaders: [],
       ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
       diagnostics: [
         {
@@ -205,13 +230,14 @@ export function compileSync<Target extends "glsl" | "glsl-es-300" | "glsl-450" |
         },
       ],
       target,
-    } as CompileResult<Target>;
+    } as CompileResult;
   }
 
   const { statements, hasImports } = collectSingleFile(source);
   if (hasImports) {
     return {
       code: null,
+      shaders: [],
       ast: { kind: "Program", statements, span: { line: 1, column: 1 } },
       diagnostics: [
         {
@@ -221,7 +247,7 @@ export function compileSync<Target extends "glsl" | "glsl-es-300" | "glsl-450" |
         },
       ],
       target,
-    } as CompileResult<Target>;
+    } as CompileResult;
   }
 
   const programAst: Program = {
@@ -230,7 +256,7 @@ export function compileSync<Target extends "glsl" | "glsl-es-300" | "glsl-450" |
     span: { line: 1, column: 1 },
   };
 
-  return compileProgram(programAst, file, target as Target);
+  return compileProgram(programAst, file, target, options.registry, options.provenance);
 }
 
 /**
@@ -240,16 +266,16 @@ export function compileSync<Target extends "glsl" | "glsl-es-300" | "glsl-450" |
  * @param options - Compilation options (target, resolver, and either `source` or `ast`).
  * @returns CompileResult indexed by the target.
  */
-export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl">(
-  options: CompileAsyncOptions<Target>,
-): Promise<CompileResult<Target>> {
+export async function compileAsync(
+  options: CompileAsyncOptions,
+): Promise<CompileResult> {
   const { target, resolver } = options;
   const file = options.file ?? options.sourceId ?? "test.gl";
   const sourceId = options.sourceId ?? file;
 
   // AST-based path: skip parsing / imports
   if (options.ast) {
-    return compileProgram(options.ast, file, target);
+    return compileProgram(options.ast, file, target, options.registry, options.provenance);
   }
 
   // Source-based path: resolve module graph + typecheck + codegen
@@ -257,6 +283,7 @@ export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl
   if (!source) {
     return {
       code: null,
+      shaders: [],
       ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
       diagnostics: [
         {
@@ -266,7 +293,7 @@ export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl
         },
       ],
       target,
-    } as CompileResult<Target>;
+    } as CompileResult;
   }
 
   let graph: CollectedProgram | undefined;
@@ -280,6 +307,7 @@ export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl
   } catch (err) {
     return {
       code: null,
+      shaders: [],
       ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
       diagnostics: [
         {
@@ -289,7 +317,7 @@ export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl
         },
       ],
       target,
-    } as CompileResult<Target>;
+    } as CompileResult;
   }
 
   const programAst: Program = {
@@ -298,7 +326,7 @@ export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl
     span: { line: 1, column: 1 },
   };
 
-  return compileProgram(programAst, file, target as Target);
+  return compileProgram(programAst, file, target, options.registry, graph!.provenance);
 }
 
 /**
@@ -312,10 +340,10 @@ export async function compileAsync<Target extends "glsl" | "glsl-es-300" | "glsl
  * @param options - Compilation options (target, file, and either `source` or `ast`).
  * @returns CompileResult indexed by the target.
  */
-export function compile<Target extends "glsl" | "glsl-es-300" | "glsl-450" | "wgsl">(
-  options: CompileOptions & { target: Target },
-): CompileResult<Target> {
-  return compileSync(options as CompileSyncOptions<Target>);
+export function compile(
+  options: CompileOptions,
+): CompileResult {
+  return compileSync(options as CompileSyncOptions);
 }
 
 export { tokenize, parse, typeCheck, generateGLSL, generateWGSL };

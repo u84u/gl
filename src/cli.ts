@@ -1,7 +1,7 @@
 import { compileAsync } from "./index";
 import { format } from "./formatter";
 import { NodeFileSourceResolver } from "./node/resolver";
-import { resolve } from "path";
+
 import { version } from "../package.json";
 
 const args = process.argv.slice(2);
@@ -52,27 +52,29 @@ if (!inputFile) {
   process.exit(1);
 }
 
-const fs = await import("fs");
+const fs = await import("node:fs/promises");
+const pathMod = await import("node:path");
 
-const source = fs.readFileSync(inputFile, "utf-8");
+const absInput = pathMod.resolve(inputFile);
+const source = await fs.readFile(absInput, "utf-8");
 
 try {
   if (formatMode) {
     const formatted = format(source);
     if (outputFile) {
-      fs.writeFileSync(outputFile, formatted);
+      await fs.writeFile(outputFile, formatted);
     } else {
       process.stdout.write(formatted);
     }
     process.exit(0);
   }
 
-  const resolver = new NodeFileSourceResolver(resolve(inputFile));
+  const resolver = new NodeFileSourceResolver(pathMod.dirname(absInput));
   const { code, diagnostics } = await compileAsync({
     source,
     target,
-    sourceId: inputFile,
-    file: inputFile,
+    sourceId: absInput,
+    file: absInput,
     resolver,
   });
 
@@ -109,7 +111,7 @@ try {
   }
 
   if (outputFile) {
-    fs.writeFileSync(outputFile, code);
+    await fs.writeFile(outputFile, code);
   } else {
     process.stdout.write(code);
   }

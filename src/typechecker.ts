@@ -90,6 +90,7 @@ interface Scope {
 
 interface TypeCheckContext {
   file: string;
+  provenance?: Map<Statement, string>;
   scope: Scope;
   diagnostics: Diagnostic[];
   structs: Map<string, StructDecl>;
@@ -1228,7 +1229,11 @@ function checkUserCall(
  * @param file - The source file name (used in diagnostic messages).
  * @returns An object containing the collected diagnostics.
  */
-export function typeCheck(program: Program, file: string): { diagnostics: Diagnostic[] } {
+export function typeCheck(
+  program: Program,
+  file: string,
+  provenance?: Map<Statement, string>,
+): { diagnostics: Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   const structs = new Map<string, StructDecl>();
   const functions = new Map<string, FnDecl>();
@@ -1239,7 +1244,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
     if (isStructDecl(stmt)) {
       if (structs.has(stmt.name)) {
         diagnostics.push({
-          file,
+          file: provenance?.get(stmt) ?? file,
           span: stmt.span,
           message: `Duplicate struct definition '${stmt.name}'`,
         });
@@ -1248,7 +1253,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
       for (const field of stmt.fields) {
         if (containsSampler(field.type)) {
           diagnostics.push({
-            file,
+            file: provenance?.get(stmt) ?? file,
             span: stmt.span,
             message: `Struct field '${field.name}' cannot have sampler type '${typeName(field.type)}'`,
           });
@@ -1258,7 +1263,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
     if (isFnDecl(stmt)) {
       if (functions.has(stmt.name)) {
         diagnostics.push({
-          file,
+          file: provenance?.get(stmt) ?? file,
           span: stmt.span,
           message: `Duplicate function definition '${stmt.name}'`,
         });
@@ -1267,7 +1272,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
       for (const param of stmt.params) {
         if (containsSampler(param.type)) {
           diagnostics.push({
-            file,
+            file: provenance?.get(stmt) ?? file,
             span: stmt.span,
             message: `Function parameter '${param.name}' cannot have sampler type '${typeName(param.type)}'`,
           });
@@ -1275,7 +1280,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
       }
       if (containsSampler(stmt.returnType)) {
         diagnostics.push({
-          file,
+          file: provenance?.get(stmt) ?? file,
           span: stmt.span,
           message: `Function '${stmt.name}' cannot return sampler type '${typeName(stmt.returnType)}'`,
         });
@@ -1284,7 +1289,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
     if (isBindingDecl(stmt)) {
       if (bindings.has(stmt.binding)) {
         diagnostics.push({
-          file,
+          file: provenance?.get(stmt) ?? file,
           span: stmt.span,
           message: `Duplicate binding slot ${stmt.binding}`,
         });
@@ -1327,6 +1332,7 @@ export function typeCheck(program: Program, file: string): { diagnostics: Diagno
 
   const ctx: TypeCheckContext = {
     file,
+    provenance,
     scope: globalScope,
     diagnostics,
     structs,
@@ -1366,6 +1372,8 @@ function typeCheckFunction(ctx: TypeCheckContext, fn: FnDecl): void {
   const fnScope = makeScope(ctx.scope);
   const prevScope = ctx.scope;
   const prevReturn = ctx.currentFnReturnType;
+  const prevFile = ctx.file;
+  ctx.file = ctx.provenance?.get(fn) ?? ctx.file;
   ctx.scope = fnScope;
   ctx.currentFnReturnType = fn.returnType;
 
@@ -1417,6 +1425,7 @@ function typeCheckFunction(ctx: TypeCheckContext, fn: FnDecl): void {
 
   ctx.scope = prevScope;
   ctx.currentFnReturnType = prevReturn;
+  ctx.file = prevFile;
 }
 
 /**

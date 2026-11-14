@@ -1,5 +1,5 @@
-import { readFileSync } from "fs";
-import { resolve, dirname } from "path";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve, dirname, relative, isAbsolute } from "node:path";
 import { SourceModule, SourceResolver } from "../modules/resolver";
 
 /**
@@ -18,16 +18,20 @@ export class NodeFileSourceResolver implements SourceResolver {
   async resolve(specifier: string, importer: SourceModule): Promise<SourceModule> {
     const importerDir = dirname(importer.id);
     const resolvedPath = resolve(importerDir, specifier);
-    const canonicalRoot = resolve(this.rootDir);
+    const canonicalRoot = await realpath(resolve(this.rootDir)).catch(() => resolve(this.rootDir));
 
-    // Prevent path traversal outside the configured root.
-    const relative = resolvedPath.startsWith(canonicalRoot + "/")
-      ? resolvedPath.slice(canonicalRoot.length + 1)
-      : resolvedPath === canonicalRoot
-        ? ""
-        : null;
+    // Resolve the target path (must exist) to its canonical form to defeat
+    // symlink-based escapes.
+    let canonicalTarget: string;
+    try {
+      canonicalTarget = await realpath(resolvedPath);
+    } catch {
+      // File may not exist yet; fall back to resolved path for error reporting.
+      canonicalTarget = resolvedPath;
+    }
 
-    if (relative === null) {
+    const rel = relative(canonicalRoot, canonicalTarget);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
       throw new Error(
         `Import "${specifier}" resolves outside configured root ${this.rootDir}`,
       );
@@ -35,7 +39,7 @@ export class NodeFileSourceResolver implements SourceResolver {
 
     let source: string;
     try {
-      source = readFileSync(resolvedPath, "utf-8");
+      source = await readFile(resolvedPath, "utf-8");
     } catch (err) {
       throw new Error(
         `Failed to read imported module "${specifier}" from ${resolvedPath}: ${

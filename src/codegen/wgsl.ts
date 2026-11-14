@@ -1,65 +1,13 @@
-import {
-  BindingDecl,
-  Expression,
-  Program,
-  Span,
-  Statement,
-  StructDecl,
-  Type,
-  // Type guards
-  isScalar,
-  isVector,
-  isMatrix,
-  isStructType,
-  isSampler,
-  isArray,
-  isLiteral,
-  isLiteralOfKind,
-  isIdentifier,
-  isBinaryExpr,
-  isUnaryExpr,
-  isCallExpr,
-  isMemberExpr,
-  isSwizzleExpr,
-  isIndexExpr,
-  isStructLiteral,
-  isArrayLiteral,
-  isCompoundAssignExpr,
-  isUpdateExpr,
-  isConditionalExpr,
-  isNullCoalescingExpr,
-  isMatchExpr,
-  isBlockExpr,
-  // Statement guards
-  isStructDecl,
-  isBindingDecl,
-  isFnDecl,
-  isVarDecl,
-  isReturnStmt,
-  isExpressionStmt,
-  isBlock,
-  isIfStmt,
-  isWhileStmt,
-  isForStmt,
-  isDoWhileStmt,
-  isLoopStmt,
-  isBreakStmt,
-  isContinueStmt,
-  isPanicStmt,
-  isUnreachableStmt,
-  isDiscardStmt,
-  isTypeAlias,
-  isNewtypeDecl,
-  isTraitDecl,
-  isImplBlock,
-  isProgram,
-} from "../types";
+import type { Program } from "../types";
+import { IRModule, IRType, IRExpression, IRStatement, IRModuleItem, IRBlock, IRAnonymousStruct } from "../ir/shader-ir";
+import { lowerProgram } from "../ir/lower";
 import { Diagnostic, diagnostic } from "../typechecker";
 import {
   BackendCapabilities,
   ShaderTarget,
   WGSL_CAPABILITIES,
   scalarIsSupported,
+  ShaderStage,
 } from "./capabilities";
 import {
   ShaderCodegenBackend,
@@ -143,186 +91,6 @@ const MAT_PREFIX_MAP: Record<string, string> = {
 };
 
 /**
- * Recursively collects every Type node nested inside a type expression.
- *
- * @param t - The type to walk.
- * @param out - The array to append collected types to.
- */
-function collectTypes(t: Type, out: Type[]): void {
-  out.push(t);
-  if (isVector(t)) {
-    // Vectors carry an element type name, not a nested Type node.
-    return;
-  }
-  if (isMatrix(t)) {
-    return;
-  }
-  if (isArray(t)) {
-    collectTypes(t.element, out);
-    return;
-  }
-  if (t.kind === "tuple") {
-    for (const element of t.elements) {
-      collectTypes(element, out);
-    }
-    return;
-  }
-  if (t.kind === "option") {
-    collectTypes(t.element, out);
-    return;
-  }
-  if (t.kind === "result") {
-    collectTypes(t.ok, out);
-    collectTypes(t.err, out);
-    return;
-  }
-  if (t.kind === "anonymousStruct") {
-    for (const field of t.fields) {
-      collectTypes(field.type, out);
-    }
-    return;
-  }
-  if (t.kind === "union") {
-    for (const member of t.members) {
-      collectTypes(member, out);
-    }
-    return;
-  }
-}
-
-/**
- * Validates that every type in the program is supported by the WGSL backend.
- *
- * WGSL does not support i64, u64, f64, or bf16 scalars. Emitting them would
- * require silent narrowing, which is not permitted. Returns diagnostics for
- * every unsupported scalar type found.
- *
- * @param program - The program to validate.
- * @returns Diagnostics for unsupported types, or an empty array if valid.
- */
-export function validateWGSLModule(
-  program: Program,
-  file: string,
-  capabilities: BackendCapabilities = WGSL_CAPABILITIES,
-): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  const seen = new Set<Type>();
-
-  function checkType(t: Type, span: Span): void {
-    const nested: Type[] = [];
-    collectTypes(t, nested);
-    for (const nt of nested) {
-      if (seen.has(nt)) continue;
-      seen.add(nt);
-      if (isScalar(nt)) {
-        const name = nt.name;
-        if (!scalarIsSupported(capabilities, name)) {
-          diagnostics.push(
-            diagnostic(
-              file,
-              span,
-              `WGSL does not support scalar type '${name}'`,
-              {
-                code: "WGSL_UNSUPPORTED_SCALAR",
-                severity: "error",
-                help: `Convert to a supported type (${Array.from(capabilities.scalarTypes).join(", ")}) or use an explicit cast.`,
-              },
-            ),
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Recursively walks all statements, checking declarations and descending
-   * into nested blocks, function bodies, and control-flow branches.
-   */
-  function walkStatements(stmts: Statement[]): void {
-    for (const stmt of stmts) {
-      if (isVarDecl(stmt)) {
-        checkType(stmt.type, stmt.span);
-      }
-      if (isBindingDecl(stmt)) {
-        checkType(stmt.type, stmt.span);
-      }
-      if (isFnDecl(stmt)) {
-        for (const param of stmt.params) {
-          checkType(param.type, stmt.span);
-        }
-        checkType(stmt.returnType, stmt.span);
-        walkStatements(stmt.body.statements);
-      }
-      if (isStructDecl(stmt)) {
-        for (const field of stmt.fields) {
-          checkType(field.type, stmt.span);
-        }
-      }
-      if (isEnumDecl(stmt)) {
-        for (const variant of stmt.variants) {
-          if (variant.type) {
-            checkType(variant.type, stmt.span);
-          }
-        }
-      }
-      if (isTypeAlias(stmt)) {
-        checkType(stmt.type, stmt.span);
-      }
-      if (isNewtypeDecl(stmt)) {
-        checkType(stmt.innerType, stmt.span);
-      }
-      if (isTraitDecl(stmt)) {
-        for (const method of stmt.methods) {
-          for (const param of method.params) {
-            checkType(param.type, stmt.span);
-          }
-          checkType(method.returnType, stmt.span);
-        }
-      }
-      if (isImplBlock(stmt)) {
-        checkType(stmt.type, stmt.span);
-        for (const method of stmt.methods) {
-          for (const param of method.params) {
-            checkType(param.type, stmt.span);
-          }
-          checkType(method.returnType, stmt.span);
-        }
-      }
-      if (isBlock(stmt)) {
-        walkStatements(stmt.statements);
-      }
-      if (isIfStmt(stmt)) {
-        walkStatements(stmt.thenBranch.statements);
-        if (stmt.elseBranch) {
-          walkStatements(stmt.elseBranch.statements);
-        }
-      }
-      if (isWhileStmt(stmt)) {
-        walkStatements(stmt.body.statements);
-      }
-      if (isForStmt(stmt)) {
-        walkStatements(stmt.body.statements);
-      }
-      if (isDoWhileStmt(stmt)) {
-        walkStatements(stmt.body.statements);
-      }
-      if (isLoopStmt(stmt)) {
-        walkStatements(stmt.body.statements);
-      }
-    }
-  }
-
-  walkStatements(program.statements);
-
-  return diagnostics;
-}
-
-interface SamplerInfo {
-  samplerBinding: number;
-  samplerName: string;
-}
-
-/**
  * Maps a gl sampler name to its WGSL texture type.
  *
  * @param name - The gl sampler name (e.g. "sampler2D").
@@ -348,20 +116,20 @@ function samplerTextureType(name: string): string {
  * @param t - The gl type to convert.
  * @returns The WGSL type string.
  */
-function wgslType(t: Type): string {
-  if (isScalar(t)) {
+function wgslType(t: IRType): string {
+  if ((t.kind === "scalar")) {
     const mapped = SCALAR_MAP[t.name];
     if (!mapped) throw new Error(`Unknown scalar type: ${t.name}`);
     return mapped;
   }
-  if (isVector(t)) {
+  if ((t.kind === "vector")) {
     const prefix = VEC_TYPE_MAP[t.element] || "vec";
     return `${prefix}<${t.element}>`;
   }
-  if (isStructType(t)) return t.name;
-  if (isSampler(t)) return "sampler";
+  if ((t.kind === "struct")) return t.name;
+  if ((t.kind === "sampler")) return "sampler";
   if (t.kind === "quaternion") return "vec4<f32>";
-  if (isMatrix(t)) {
+  if ((t.kind === "matrix")) {
     const prefix = MAT_PREFIX_MAP[t.element] || "";
     if (t.rows === t.columns) {
       return `${prefix}mat${t.rows}x${t.rows}<${t.element}>`;
@@ -372,7 +140,7 @@ function wgslType(t: Type): string {
   if (t.kind === "anonymousStruct") {
     return `AnonStruct_${t.fields.length}`;
   }
-  if (isArray(t)) {
+  if ((t.kind === "array")) {
     return `array<${wgslType(t.element)}, ${t.size}>`;
   }
   throw new Error(`Cannot emit WGSL type for ${t.kind}`);
@@ -393,13 +161,18 @@ interface WgslContext {
  * @param mainReturnStruct - The struct name main returns, or null.
  * @returns The WgslContext.
  */
+interface SamplerInfo {
+  samplerBinding: number;
+  samplerName: string;
+}
+
 function buildContext(
-  program: Program,
+  module: IRModule,
   mainReturnStruct: string | null,
 ): WgslContext {
   const samplerMap = new Map<string, SamplerInfo>();
-  const bindings = program.statements.filter(
-    (s): s is BindingDecl => s.kind === "BindingDecl",
+  const bindings = module.items.filter(
+    (s): s is Extract<IRModuleItem, { kind: "binding" }> => s.kind === "binding",
   );
   let maxBinding = -1;
   for (const b of bindings) {
@@ -407,7 +180,7 @@ function buildContext(
   }
   let samplerCounter = maxBinding + 1;
   for (const b of bindings) {
-    if (isSampler(b.type)) {
+    if ((b.type.kind === "sampler")) {
       samplerMap.set(b.name, {
         samplerBinding: samplerCounter++,
         samplerName: `${b.name}_sampler`,
@@ -417,8 +190,8 @@ function buildContext(
 
   const structLocations = new Map<string, Map<string, number>>();
   if (mainReturnStruct) {
-    const structDecl = program.statements.find(
-      (s): s is StructDecl => s.kind === "StructDecl" && s.name === mainReturnStruct,
+    const structDecl = module.items.find(
+      (s): s is Extract<IRModuleItem, { kind: "struct" }> => s.kind === "struct" && s.name === mainReturnStruct,
     );
     if (structDecl) {
       const locations = new Map<string, number>();
@@ -440,24 +213,24 @@ function buildContext(
  * @returns The generated WGSL source code string.
  * @throws Error if the program has no main function or main has invalid signature.
  */
-export function generateWGSL(program: Program): string {
+export function generateWGSLFromIR(module: IRModule): string {
   const lines: string[] = [];
   lines.push("// Generated by @u84u/gl");
   lines.push("");
 
-  const mainIndex = program.statements.findIndex(
-    (s): s is Extract<Statement, { kind: "FnDecl" }> => s.kind === "FnDecl" && s.name === "main"
+  const mainIndex = module.items.findIndex(
+    (s): s is Extract<IRModuleItem, { kind: "fn" }> => s.kind === "fn" && s.name === "main"
   );
 
   if (mainIndex === -1) {
     throw new Error("No main function found — fragment shaders require an entry point");
   }
 
-  const mainFnStmt = program.statements[mainIndex];
+  const mainFnStmt = module.items[mainIndex];
   if (!mainFnStmt) {
     throw new Error("main statement is undefined");
   }
-  if (!isFnDecl(mainFnStmt)) {
+  if (!(mainFnStmt.kind === "fn")) {
     throw new Error("main is not a function declaration");
   }
   const mainFn = mainFnStmt;
@@ -467,12 +240,12 @@ export function generateWGSL(program: Program): string {
   }
 
   const mainReturnStruct =
-    isStructType(returnType) ? returnType.name : null;
-  const ctx = buildContext(program, mainReturnStruct);
+    (returnType.kind === "struct") ? returnType.name : null;
+  const ctx = buildContext(module, mainReturnStruct);
 
   let anythingEmitted = false;
-  for (let i = 0; i < program.statements.length; i++) {
-    const stmt = program.statements[i];
+  for (let i = 0; i < module.items.length; i++) {
+    const stmt = module.items[i];
     if (!stmt) continue;
     if (i === mainIndex) continue;
     emitStatement(lines, stmt, 0, ctx);
@@ -495,14 +268,14 @@ export function generateWGSL(program: Program): string {
   const stage = mainFn.stage ?? "fragment";
 
   if (stage === "fragment") {
-    if (isVector(returnType) && returnType.size === 4) {
+    if ((returnType.kind === "vector") && returnType.size === 4) {
       lines.push("@fragment");
       lines.push("fn main() -> @location(0) vec4<f32> {");
       for (const s of mainFn.body.statements) {
         emitStatement(lines, s, 1, ctx);
       }
       lines.push("}");
-    } else if (isStructType(returnType)) {
+    } else if ((returnType.kind === "struct")) {
       lines.push("@fragment");
       lines.push(`fn main() -> ${returnType.name} {`);
       for (const s of mainFn.body.statements) {
@@ -513,7 +286,7 @@ export function generateWGSL(program: Program): string {
       throw new Error("fragment main must return vec4 or a struct");
     }
   } else if (stage === "vertex") {
-    if (isVector(returnType) && returnType.size === 4) {
+    if ((returnType.kind === "vector") && returnType.size === 4) {
       lines.push("@vertex");
       lines.push("fn main() -> @builtin(position) vec4<f32> {");
       for (const s of mainFn.body.statements) {
@@ -547,12 +320,12 @@ export function generateWGSL(program: Program): string {
  */
 function emitStatement(
   lines: string[],
-  stmt: Statement,
+  stmt: IRStatement | IRModuleItem,
   indent: number,
   ctx: WgslContext,
 ): void {
   const pad = "  ".repeat(indent);
-  if (isStructDecl(stmt)) {
+  if ((stmt.kind === "struct")) {
     const locations = ctx.structLocations.get(stmt.name);
     lines.push(`${pad}struct ${stmt.name} {`);
     for (const field of stmt.fields) {
@@ -568,15 +341,15 @@ function emitStatement(
     lines.push(`${pad}};`);
     return;
   }
-  if (isEnumDecl(stmt)) {
+  if ((stmt.kind === "enum")) {
     // WGSL has no native enum; document the variants as a comment.
     const variants = stmt.variants.map((v) => v.name).join(", ");
     lines.push(`${pad}// enum ${stmt.name} (${variants})`);
     return;
   }
-  if (isBindingDecl(stmt)) {
+  if ((stmt.kind === "binding")) {
     const group = 0;
-    if (isSampler(stmt.type)) {
+    if ((stmt.type.kind === "sampler")) {
       const info = ctx.samplerMap.get(stmt.name);
       const declType = samplerTextureType(stmt.type.name);
       lines.push(
@@ -595,7 +368,7 @@ function emitStatement(
     );
     return;
   }
-  if (isFnDecl(stmt)) {
+  if ((stmt.kind === "fn")) {
     const params = stmt.params
       .map((p) => `${p.name}: ${wgslType(p.type)}`)
       .join(", ");
@@ -606,8 +379,8 @@ function emitStatement(
     lines.push(`${pad}}`);
     return;
   }
-  if (isVarDecl(stmt)) {
-    if (stmt.initializer && isMatchExpr(stmt.initializer)) {
+  if ((stmt.kind === "varDecl")) {
+    if (stmt.initializer && (stmt.initializer.kind === "match")) {
       lines.push(`${pad}let ${stmt.name}: ${wgslType(stmt.type)};`);
       emitMatchAssignStatement(lines, stmt.initializer, stmt.name, indent, ctx);
       return;
@@ -620,7 +393,7 @@ function emitStatement(
     lines.push(`${pad}${kind} ${stmt.name}: ${wgslType(stmt.type)}${init};`);
     return;
   }
-  if (isReturnStmt(stmt)) {
+  if ((stmt.kind === "return")) {
     if (!stmt.value) {
       lines.push(`${pad}return;`);
       return;
@@ -628,15 +401,15 @@ function emitStatement(
     lines.push(`${pad}return ${emitExpression(stmt.value, ctx)};`);
     return;
   }
-  if (isExpressionStmt(stmt)) {
-    if (isMatchExpr(stmt.expression)) {
+  if ((stmt.kind === "expressionStmt")) {
+    if ((stmt.expression.kind === "match")) {
       emitMatchStatement(lines, stmt.expression, indent, ctx);
       return;
     }
     lines.push(`${pad}${emitExpression(stmt.expression, ctx)};`);
     return;
   }
-  if (isBlock(stmt)) {
+  if ((stmt.kind === "block")) {
     lines.push(`${pad}{`);
     for (const s of stmt.statements) {
       emitStatement(lines, s, indent + 1, ctx);
@@ -644,7 +417,7 @@ function emitStatement(
     lines.push(`${pad}}`);
     return;
   }
-  if (isIfStmt(stmt)) {
+  if ((stmt.kind === "if")) {
     lines.push(`${pad}if ${emitExpression(stmt.condition, ctx)} {`);
     for (const s of stmt.thenBranch.statements) {
       emitStatement(lines, s, indent + 1, ctx);
@@ -659,7 +432,7 @@ function emitStatement(
     }
     return;
   }
-  if (isWhileStmt(stmt)) {
+  if ((stmt.kind === "while")) {
     lines.push(`${pad}while ${emitExpression(stmt.condition, ctx)} {`);
     for (const s of stmt.body.statements) {
       emitStatement(lines, s, indent + 1, ctx);
@@ -667,7 +440,7 @@ function emitStatement(
     lines.push(`${pad}}`);
     return;
   }
-  if (isForStmt(stmt)) {
+  if ((stmt.kind === "for")) {
     if (stmt.range) {
       const { variable, start, end, inclusive } = stmt.range;
       const startCode = emitExpression(start, ctx);
@@ -688,9 +461,9 @@ function emitStatement(
     }
     // C-style for: WGSL has no C-style for, lower to loop + break.
     if (stmt.init) {
-      if (isVarDecl(stmt.init)) {
+      if ((stmt.init.kind === "varDecl")) {
         emitStatement(lines, stmt.init, indent, ctx);
-      } else if (isExpressionStmt(stmt.init)) {
+      } else if ((stmt.init.kind === "expressionStmt")) {
         emitStatement(lines, stmt.init, indent, ctx);
       }
     }
@@ -709,7 +482,7 @@ function emitStatement(
     lines.push(`${pad}}`);
     return;
   }
-  if (isDoWhileStmt(stmt)) {
+  if ((stmt.kind === "doWhile")) {
     lines.push(`${pad}loop {`);
     for (const s of stmt.body.statements) {
       emitStatement(lines, s, indent + 1, ctx);
@@ -720,7 +493,7 @@ function emitStatement(
     lines.push(`${pad}}`);
     return;
   }
-  if (isLoopStmt(stmt)) {
+  if ((stmt.kind === "loop")) {
     lines.push(`${pad}loop {`);
     for (const s of stmt.body.statements) {
       emitStatement(lines, s, indent + 1, ctx);
@@ -728,15 +501,15 @@ function emitStatement(
     lines.push(`${pad}}`);
     return;
   }
-  if (isBreakStmt(stmt)) {
+  if ((stmt.kind === "break")) {
     lines.push(`${pad}break;`);
     return;
   }
-  if (isContinueStmt(stmt)) {
+  if ((stmt.kind === "continue")) {
     lines.push(`${pad}continue;`);
     return;
   }
-  if (isPanicStmt(stmt)) {
+  if ((stmt.kind === "panic")) {
     if (stmt.message) {
       lines.push(`${pad}// panic: ${emitExpression(stmt.message, ctx)}`);
     } else {
@@ -744,23 +517,17 @@ function emitStatement(
     }
     return;
   }
-  if (isUnreachableStmt(stmt)) {
+  if ((stmt.kind === "unreachable")) {
     lines.push(`${pad}// unreachable`);
     return;
   }
-  if (isDiscardStmt(stmt)) {
+  if ((stmt.kind === "discard")) {
     lines.push(`${pad}discard;`);
     return;
   }
   // TypeAlias, NewtypeDecl, OpaqueDecl — transparent
 }
 
-/**
- * Type guard: enum decl.
- */
-function isEnumDecl(s: Statement): s is Extract<Statement, { kind: "EnumDecl" }> {
-  return s.kind === "EnumDecl";
-}
 
 /**
  * Emits WGSL code for an expression.
@@ -769,22 +536,22 @@ function isEnumDecl(s: Statement): s is Extract<Statement, { kind: "EnumDecl" }>
  * @param ctx - The WGSL rendering context.
  * @returns The WGSL expression string.
  */
-function emitExpression(expr: Expression, ctx: WgslContext): string {
-  if (isIdentifier(expr)) {
+function emitExpression(expr: IRExpression, ctx: WgslContext): string {
+  if ((expr.kind === "identifier")) {
     return expr.name;
   }
-  if (isLiteral(expr)) {
+  if ((expr.kind === "literal")) {
     return emitLiteral(expr);
   }
-  if (isBinaryExpr(expr)) {
+  if ((expr.kind === "binary")) {
     return `(${emitExpression(expr.left, ctx)} ${expr.operator} ${emitExpression(expr.right, ctx)})`;
   }
-  if (isUnaryExpr(expr)) {
+  if ((expr.kind === "unary")) {
     return `(${expr.operator}${emitExpression(expr.operand, ctx)})`;
   }
-  if (isCallExpr(expr)) {
+  if ((expr.kind === "call")) {
     const calleeName =
-      expr.callee.kind === "Identifier"
+      expr.callee.kind === "identifier"
         ? expr.callee.name
         : emitExpression(expr.callee, ctx);
     const constructorName = CONSTRUCTOR_TYPE_MAP[calleeName];
@@ -801,32 +568,32 @@ function emitExpression(expr: Expression, ctx: WgslContext): string {
     }
     return `${name}(${args})`;
   }
-  if (isMemberExpr(expr)) {
+  if ((expr.kind === "member")) {
     return `${emitExpression(expr.object, ctx)}.${expr.property}`;
   }
-  if (isSwizzleExpr(expr)) {
+  if ((expr.kind === "swizzle")) {
     const swizzle = expr.components.join("");
     return `${emitExpression(expr.object, ctx)}.${swizzle}`;
   }
-  if (isIndexExpr(expr)) {
+  if ((expr.kind === "index")) {
     return `${emitExpression(expr.object, ctx)}[${emitExpression(expr.index, ctx)}]`;
   }
-  if (isStructLiteral(expr)) {
+  if ((expr.kind === "structLiteral")) {
     const fields = expr.fields.map((f) => {
       if (f.name === null) return `..${emitExpression(f.value, ctx)}`;
       return emitExpression(f.value, ctx);
     }).join(", ");
     return `${expr.typeName}(${fields})`;
   }
-  if (isArrayLiteral(expr)) {
+  if ((expr.kind === "arrayLiteral")) {
     const elements = expr.elements.map((e) => emitExpression(e, ctx));
     const elementType = inferWgslElementType(expr.elements[0]!);
     return `array<${elementType}>(${elements.join(", ")})`;
   }
-  if (isCompoundAssignExpr(expr)) {
+  if ((expr.kind === "compoundAssign")) {
     return `(${emitExpression(expr.target, ctx)} = ${emitExpression(expr.target, ctx)} ${expr.operator.slice(0, -1)} ${emitExpression(expr.value, ctx)})`;
   }
-  if (isUpdateExpr(expr)) {
+  if ((expr.kind === "update")) {
     const op = expr.operator === "++" ? "+ 1" : "- 1";
     const operandCode = emitExpression(expr.operand, ctx);
     if (expr.prefix) {
@@ -834,20 +601,20 @@ function emitExpression(expr: Expression, ctx: WgslContext): string {
     }
     return `(${operandCode} = ${operandCode} ${op})`;
   }
-  if (isConditionalExpr(expr)) {
+  if ((expr.kind === "conditional")) {
     return `(${emitExpression(expr.test, ctx)} ? ${emitExpression(expr.consequent, ctx)} : ${emitExpression(expr.alternate, ctx)})`;
   }
-  if (isNullCoalescingExpr(expr)) {
+  if ((expr.kind === "nullCoalescing")) {
     return `(${emitExpression(expr.left, ctx)} != 0 ? ${emitExpression(expr.left, ctx)} : ${emitExpression(expr.right, ctx)})`;
   }
-  if (isMatchExpr(expr)) {
+  if ((expr.kind === "match")) {
     return emitMatchExpression(expr, ctx);
   }
-  if (isBlockExpr(expr)) {
+  if ((expr.kind === "blockExpr")) {
     const stmts = expr.block.statements;
     if (stmts.length === 0) return "0.0";
     const last = stmts[stmts.length - 1]!;
-    if (isExpressionStmt(last)) {
+    if ((last.kind === "expressionStmt")) {
       return emitExpression(last.expression, ctx);
     }
     return "0.0";
@@ -862,8 +629,8 @@ function emitExpression(expr: Expression, ctx: WgslContext): string {
  * @param ctx - The WGSL rendering context.
  * @returns The WGSL expression string.
  */
-function emitMatchExpression(expr: Expression, ctx: WgslContext): string {
-  if (!isMatchExpr(expr)) throw new Error("Not a match expression");
+function emitMatchExpression(expr: IRExpression, ctx: WgslContext): string {
+  if (!(expr.kind === "match")) throw new Error("Not a match expression");
   const subjectCode = emitExpression(expr.subject, ctx);
   const branches: string[] = [];
   for (let i = 0; i < expr.arms.length; i++) {
@@ -908,11 +675,11 @@ function isBindingPattern(p: { kind: string }): p is { kind: "binding"; binding:
  */
 function emitMatchStatement(
   lines: string[],
-  expr: Expression,
+  expr: IRExpression,
   indent: number,
   ctx: WgslContext,
 ): void {
-  if (!isMatchExpr(expr)) throw new Error("Not a match expression");
+  if (!(expr.kind === "match")) throw new Error("Not a match expression");
   const pad = "  ".repeat(indent);
   const subjectCode = emitExpression(expr.subject, ctx);
   for (let i = 0; i < expr.arms.length; i++) {
@@ -948,12 +715,12 @@ function emitMatchStatement(
  */
 function emitMatchAssignStatement(
   lines: string[],
-  expr: Expression,
+  expr: IRExpression,
   target: string,
   indent: number,
   ctx: WgslContext,
 ): void {
-  if (!isMatchExpr(expr)) throw new Error("Not a match expression");
+  if (!(expr.kind === "match")) throw new Error("Not a match expression");
   const pad = "  ".repeat(indent);
   const subjectCode = emitExpression(expr.subject, ctx);
   for (let i = 0; i < expr.arms.length; i++) {
@@ -986,7 +753,7 @@ function emitMatchAssignStatement(
  * @param lines - The output lines array to append to.
  */
 function emitMatchBodyAssigning(
-  stmts: Statement[],
+  stmts: (IRStatement | IRModuleItem)[],
   target: string,
   indent: number,
   ctx: WgslContext,
@@ -997,7 +764,7 @@ function emitMatchBodyAssigning(
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i]!;
     const isLast = i === lastIdx;
-    if (isLast && isExpressionStmt(s)) {
+    if (isLast && (s.kind === "expressionStmt")) {
       lines.push(`${pad}${target} = ${emitExpression(s.expression, ctx)};`);
     } else {
       emitStatement(lines, s, indent, ctx);
@@ -1013,31 +780,31 @@ function emitMatchBodyAssigning(
  * @param ctx - The WGSL rendering context.
  * @returns The concatenated WGSL code string.
  */
-function emitMatchBodyToString(stmts: Statement[], ctx: WgslContext): string {
+function emitMatchBodyToString(stmts: (IRStatement | IRModuleItem)[], ctx: WgslContext): string {
   const parts: string[] = [];
   for (const s of stmts) {
-    if (isReturnStmt(s)) {
+    if ((s.kind === "return")) {
       if (s.value) {
         parts.push(`return ${emitExpression(s.value, ctx)};`);
       } else {
         parts.push("return;");
       }
-    } else if (isExpressionStmt(s)) {
+    } else if ((s.kind === "expressionStmt")) {
       parts.push(`${emitExpression(s.expression, ctx)};`);
-    } else if (isVarDecl(s)) {
+    } else if ((s.kind === "varDecl")) {
       let init = "";
       if (s.initializer) {
         init = ` = ${emitExpression(s.initializer, ctx)}`;
       }
       const kind = s.mutable ? "var" : "let";
       parts.push(`${kind} ${s.name}: ${wgslType(s.type)}${init};`);
-    } else if (isBlock(s)) {
+    } else if ((s.kind === "block")) {
       parts.push("{ ");
       for (const inner of s.statements) {
         parts.push(emitMatchBodyToString([inner], ctx));
       }
       parts.push(" }");
-    } else if (isIfStmt(s)) {
+    } else if ((s.kind === "if")) {
       parts.push(`if (${emitExpression(s.condition, ctx)}) { `);
       for (const inner of s.thenBranch.statements) {
         parts.push(emitMatchBodyToString([inner], ctx));
@@ -1050,11 +817,11 @@ function emitMatchBodyToString(stmts: Statement[], ctx: WgslContext): string {
         }
         parts.push(" }");
       }
-    } else if (isDiscardStmt(s)) {
+    } else if ((s.kind === "discard")) {
       parts.push("discard;");
-    } else if (isBreakStmt(s)) {
+    } else if ((s.kind === "break")) {
       parts.push("break;");
-    } else if (isContinueStmt(s)) {
+    } else if ((s.kind === "continue")) {
       parts.push("continue;");
     }
   }
@@ -1067,11 +834,11 @@ function emitMatchBodyToString(stmts: Statement[], ctx: WgslContext): string {
  * @param expr - The first element expression.
  * @returns The WGSL element type string.
  */
-function inferWgslElementType(expr: Expression): string {
-  if (isLiteral(expr)) {
-    if (isLiteralOfKind(expr, "int")) return "i32";
-    if (isLiteralOfKind(expr, "float")) return "f32";
-    if (isLiteralOfKind(expr, "bool")) return "bool";
+function inferWgslElementType(expr: IRExpression): string {
+  if ((expr.kind === "literal")) {
+    if ((expr.kind === "literal" && expr.literalKind === "int")) return "i32";
+    if ((expr.kind === "literal" && expr.literalKind === "float")) return "f32";
+    if ((expr.kind === "literal" && expr.literalKind === "bool")) return "bool";
   }
   return "f32";
 }
@@ -1082,19 +849,19 @@ function inferWgslElementType(expr: Expression): string {
  * @param expr - The Literal expression to emit.
  * @returns The WGSL literal string.
  */
-function emitLiteral(expr: Extract<Expression, { kind: "Literal" }>): string {
+function emitLiteral(expr: Extract<IRExpression, { kind: "literal" }>): string {
   const { value } = expr;
-  if (isLiteralOfKind(expr, "bool")) return value ? "true" : "false";
-  if (isLiteralOfKind(expr, "int")) return `${typeof value === "number" ? value : Number(value)}`;
-  if (isLiteralOfKind(expr, "float")) {
+  if ((expr.kind === "literal" && expr.literalKind === "bool")) return value ? "true" : "false";
+  if ((expr.kind === "literal" && expr.literalKind === "int")) return `${typeof value === "number" ? value : Number(value)}`;
+  if ((expr.kind === "literal" && expr.literalKind === "float")) {
     const f = typeof value === "number" ? value : Number(value);
     if (Number.isInteger(f)) return `${f}.0`;
     return String(f);
   }
-  if (isLiteralOfKind(expr, "char")) {
+  if ((expr.kind === "literal" && expr.literalKind === "char")) {
     return charToCode(typeof value === "string" ? value : String(value)).toString();
   }
-  if (isLiteralOfKind(expr, "color")) {
+  if ((expr.kind === "literal" && expr.literalKind === "color")) {
     return `0x${typeof value === "string" ? value : String(value)}`;
   }
   return String(value);
@@ -1120,6 +887,160 @@ function charToCode(s: string): number {
   }
 }
 
+export function validateWGSLModuleIR(
+  module: IRModule,
+  file: string,
+  capabilities: BackendCapabilities,
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const seen = new Set<IRType>();
+
+  function checkType(t: IRType, span: { line: number; column: number }): void {
+    const nested: IRType[] = [];
+    const collect = (x: IRType): void => {
+      if (seen.has(x)) return;
+      seen.add(x);
+      switch (x.kind) {
+        case "scalar":
+          nested.push(x);
+          break;
+        case "vector":
+        case "matrix":
+          nested.push({ kind: "scalar", name: x.element } as IRType);
+          break;
+        case "array":
+          collect(x.element);
+          break;
+        case "anonymousStruct":
+          for (const f of x.fields) collect(f.type);
+          break;
+        case "union":
+          for (const m of x.members) collect(m);
+          break;
+        case "option":
+          collect(x.element);
+          break;
+        case "result":
+          collect(x.ok);
+          collect(x.err);
+          break;
+        case "tuple":
+          for (const e of x.elements) collect(e);
+          break;
+        default:
+          break;
+      }
+    };
+    collect(t);
+    for (const nt of nested) {
+      if (nt.kind !== "scalar") continue;
+      const name = nt.name;
+      if (!scalarIsSupported(capabilities, name as any)) {
+        diagnostics.push(
+          diagnostic(file, span, `WGSL does not support scalar type '${name}'`, {
+            code: "WGSL_UNSUPPORTED_SCALAR",
+            severity: "error",
+            help: `Convert to a supported type (${Array.from(capabilities.scalarTypes).join(", ")}) or use an explicit cast.`,
+          }),
+        );
+      }
+    }
+  }
+
+  function spanOf(s: { span?: { line: number; column: number } }): { line: number; column: number } {
+    return s.span ? { line: s.span.line, column: s.span.column } : { line: 1, column: 1 };
+  }
+
+  function walkBlock(block: IRBlock): void {
+    for (const stmt of block.statements) walkStmt(stmt);
+  }
+
+  function walkStmt(stmt: IRStatement | IRModuleItem): void {
+    switch (stmt.kind) {
+      case "varDecl":
+        checkType(stmt.type, spanOf(stmt));
+        if (stmt.initializer) { /* expressions not type-checked here */ }
+        break;
+      case "binding":
+        checkType(stmt.type, spanOf(stmt));
+        break;
+      case "fn":
+        for (const p of stmt.params) checkType(p.type, spanOf(stmt));
+        checkType(stmt.returnType, spanOf(stmt));
+        walkBlock(stmt.body);
+        break;
+      case "struct":
+        for (const f of stmt.fields) checkType(f.type, spanOf(stmt));
+        break;
+      case "enum":
+        for (const v of stmt.variants) {
+          if (v.type) checkType(v.type, spanOf(stmt));
+        }
+        break;
+      case "typeAlias":
+        checkType(stmt.type, spanOf(stmt));
+        break;
+      case "newtype":
+        checkType(stmt.innerType, spanOf(stmt));
+        break;
+      case "trait":
+        for (const m of stmt.methods) {
+          for (const p of m.params) checkType(p.type, spanOf(stmt));
+          checkType(m.returnType, spanOf(stmt));
+        }
+        break;
+      case "implBlock":
+        checkType(stmt.type, spanOf(stmt));
+        for (const m of stmt.methods) {
+          for (const p of m.params) checkType(p.type, spanOf(stmt));
+          checkType(m.returnType, spanOf(stmt));
+        }
+        break;
+      case "if":
+        walkBlock(stmt.thenBranch);
+        if (stmt.elseBranch) walkBlock(stmt.elseBranch);
+        break;
+      case "while":
+        walkBlock(stmt.body);
+        break;
+      case "for":
+        walkBlock(stmt.body);
+        break;
+      case "doWhile":
+        walkBlock(stmt.body);
+        break;
+      case "loop":
+        walkBlock(stmt.body);
+        break;
+      case "block":
+        walkBlock(stmt as IRBlock);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Stage validation
+  const mainFn = module.items.find(
+    (s): s is Extract<IRModuleItem, { kind: "fn" }> => s.kind === "fn" && s.name === "main",
+  );
+  if (mainFn) {
+    const stage = mainFn.stage;
+    if (!capabilities.shaderStages.has(stage as any)) {
+      diagnostics.push(
+        diagnostic(file, spanOf(mainFn), `WGSL target does not support shader stage '${stage}'`, {
+          code: "WGSL_UNSUPPORTED_STAGE",
+          severity: "error",
+          help: `Supported stages: ${Array.from(capabilities.shaderStages).join(", ")}`,
+        }),
+      );
+    }
+  }
+
+  for (const item of module.items) walkStmt(item);
+  return diagnostics;
+}
+
 /**
  * WGSL code-generation backend for WebGPU.
  */
@@ -1128,43 +1049,42 @@ export class WgslBackend implements ShaderCodegenBackend {
   readonly version = "1.0";
   readonly capabilities: BackendCapabilities = WGSL_CAPABILITIES;
 
-  validate(ast: unknown, file: string): Diagnostic[] {
-    if (!isProgram(ast)) {
+  validate(module: IRModule, file: string): Diagnostic[] {
+    if (!module || !Array.isArray(module.items)) {
       return [{
         file,
         span: { line: 1, column: 1 },
-        message: "Invalid program passed to WGSL backend",
-        code: "INVALID_PROGRAM",
+        message: "Invalid IR module passed to WGSL backend",
+        code: "INVALID_MODULE",
         severity: "error",
       }];
     }
-    return validateWGSLModule(ast, file, this.capabilities);
+    return validateWGSLModuleIR(module, file, this.capabilities);
   }
 
   generate(
-    ast: unknown,
+    module: IRModule,
     _file: string,
     _options: CodegenOptions = {},
   ): BackendOutput {
-    if (!isProgram(ast)) {
+    if (!module || !Array.isArray(module.items)) {
       return {
         target: this.id,
         shaders: [],
         diagnostics: [{
           file: _file,
           span: { line: 1, column: 1 },
-          message: "Invalid program passed to WGSL backend",
-          code: "INVALID_PROGRAM",
+          message: "Invalid IR module passed to WGSL backend",
+          code: "INVALID_MODULE",
           severity: "error",
         }],
       };
     }
-    const program = ast;
     const diagnostics: Diagnostic[] = [];
     let code: string | null = null;
 
     try {
-      code = generateWGSL(program);
+      code = generateWGSLFromIR(module);
     } catch (err) {
       diagnostics.push({
         file: _file,
@@ -1176,18 +1096,41 @@ export class WgslBackend implements ShaderCodegenBackend {
 
     const shaders: ShaderArtifact[] = [];
     if (code) {
-      const mainStmt = program.statements.find(
-        (s): s is Extract<Statement, { kind: "FnDecl" }> =>
-          s.kind === "FnDecl" && s.name === "main",
+      const mainStmt = module.items.find(
+        (s): s is Extract<IRModuleItem, { kind: "fn" }> =>
+          s.kind === "fn" && s.name === "main",
       );
-      const stage = mainStmt?.stage ?? "fragment";
+      const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
+      const resources = module.items
+        .filter((s): s is Extract<IRModuleItem, { kind: "binding" }> => s.kind === "binding")
+        .map((b) => ({
+          name: b.name,
+          kind: (b.type.kind === "sampler" ? "sampler" : "uniformBuffer") as string,
+          binding: b.binding,
+          set: 0,
+          stageVisibility: [stage],
+        }));
+      const inputs = mainStmt
+        ? mainStmt.params.map((p) => ({ name: p.name, type: wgslType(p.type) }))
+        : [];
+      const outputs: { name: string; type: string }[] = [];
+      if (mainStmt && stage !== "compute") {
+        const rt = mainStmt.returnType;
+        if (rt.kind === "anonymousStruct") {
+          for (const f of (rt as IRAnonymousStruct).fields) {
+            outputs.push({ name: f.name, type: wgslType(f.type) });
+          }
+        } else {
+          outputs.push({ name: "result", type: wgslType(rt) });
+        }
+      }
       shaders.push({
         stage,
         entryPoint: "main",
         code,
         reflection: {
-          entryPoints: [],
-          resources: [],
+          entryPoints: [{ name: "main", stage, inputs, outputs }],
+          resources,
           uniforms: [],
         },
       } as ShaderArtifact);
@@ -1203,4 +1146,8 @@ export class WgslBackend implements ShaderCodegenBackend {
 
 export const wgslBackend = new WgslBackend();
 defaultRegistry.register(wgslBackend);
+
+export function generateWGSL(program: Program): string {
+  return generateWGSLFromIR(lowerProgram(program, "test.gl"));
+}
 

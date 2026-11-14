@@ -25,8 +25,9 @@ import {
 import {
   IRModule, IRType, IRExpression, IRStatement, IRVarDecl, IRExpressionStmt,
   IRBlock, IRForRange, IRMatchArm, IRPattern, IRStructDecl, IRBindingDecl,
-  IREnumDecl, IRFnDecl, IREntryPoint, IRScalarName, IRTypeAlias,
+  IREnumDecl, IRFnDecl, IREntryPoint, IRTypeAlias,
   IRNewtypeDecl, IROpaqueDecl, IRTraitDecl, IRImplBlock, IRSpan,
+  IRModuleItem,
 } from "./shader-ir";
 
 /* ------------------------------------------------------------------ */
@@ -46,14 +47,14 @@ function lowerType(t: Type, span?: IRSpan): IRType {
     ({ ...extra, kind, ...(span ? { span } : {} ) } as IRType);
 
   if (isScalar(t)) {
-    return base("scalar", { name: t.name as IRScalarName });
+    return base("scalar", { name: t.name });
   }
   if (isVector(t)) {
-    return base("vector", { element: t.element as IRScalarName, size: t.size });
+    return base("vector", { element: t.element, size: t.size });
   }
   if (isMatrix(t)) {
     return base("matrix", {
-      element: t.element as IRScalarName,
+      element: t.element,
       rows: t.rows,
       columns: t.columns,
     });
@@ -91,16 +92,16 @@ function lowerType(t: Type, span?: IRSpan): IRType {
     return { kind: "tuple", elements: t.elements.map((el) => lowerType(el)), span };
   }
   if (isAbstractInt(t)) {
-    return base("scalar", { name: "abstractInt" as IRScalarName });
+    return base("scalar", { name: "abstractInt" });
   }
   if (isAbstractFloat(t)) {
-    return base("scalar", { name: "abstractFloat" as IRScalarName });
+    return base("scalar", { name: "abstractFloat" });
   }
   if (t.kind === "enum") {
-    return base("struct", { name: t.name });
+    return { kind: "enum", name: t.name, ...(span ? { span } : {}) };
   }
   if (t.kind === "quaternion") {
-    return base("scalar", { name: "f32" });
+    return { kind: "quaternion", ...(span ? { span } : {}) };
   }
   return assertNever(t as never);
 }
@@ -146,9 +147,7 @@ function lowerExpression(e: Expression): IRExpression {
     return { kind: "unary", operator: e.operator, operand: lowerExpression(e.operand), span: spanOf(e) };
   }
   if (isCallExpr(e)) {
-    const callee =
-      e.callee.kind === "Identifier" ? e.callee.name : "unknown";
-    return { kind: "call", callee, args: e.args.map(lowerExpression), span: spanOf(e) };
+    return { kind: "call", callee: lowerExpression(e.callee), args: e.args.map(lowerExpression), span: spanOf(e) };
   }
   if (isMemberExpr(e)) {
     return { kind: "member", object: lowerExpression(e.object), property: e.property, span: spanOf(e) };
@@ -234,8 +233,21 @@ function lowerPattern(p: Pattern): IRPattern {
 /* Statement lowering                                                 */
 /* ------------------------------------------------------------------ */
 
+function lowerModuleItem(s: Statement): IRModuleItem {
+  if (isFnDecl(s)) return lowerFnDecl(s);
+  if (isStructDecl(s)) return lowerStructDecl(s);
+  if (isEnumDecl(s)) return lowerEnumDecl(s);
+  if (isBindingDecl(s)) return lowerBindingDecl(s);
+  if (isTypeAlias(s)) return lowerTypeAlias(s);
+  if (isNewtypeDecl(s)) return lowerNewtype(s);
+  if (isOpaqueDecl(s)) return lowerOpaque(s);
+  if (isTraitDecl(s)) return lowerTrait(s);
+  if (isImplBlock(s)) return lowerImplBlock(s);
+  return lowerStatement(s) as IRModuleItem;
+}
+
 function lowerBlock(b: Block): IRBlock {
-  return { kind: "block", statements: b.statements.map(lowerStatement), span: spanOf(b) };
+  return { kind: "block", statements: b.statements.map(lowerModuleItem), span: spanOf(b) };
 }
 
 function lowerStatement(s: Statement): IRStatement {
@@ -412,6 +424,7 @@ function lowerImplBlock(i: ImplBlock): IRImplBlock {
 /* ------------------------------------------------------------------ */
 
 export function lowerProgram(ast: Program, sourceId: string): IRModule {
+  const items: IRModuleItem[] = [];
   const functions: IRFnDecl[] = [];
   const structs: IRStructDecl[] = [];
   const enums: IREnumDecl[] = [];
@@ -427,29 +440,51 @@ export function lowerProgram(ast: Program, sourceId: string): IRModule {
     if (isFnDecl(stmt)) {
       const fn = lowerFnDecl(stmt);
       functions.push(fn);
+      items.push(fn);
       if (stmt.name === "main") {
         entryPoints.push({ stage: fn.stage, name: "main", fn });
       }
     } else if (isStructDecl(stmt)) {
-      structs.push(lowerStructDecl(stmt));
+      const s = lowerStructDecl(stmt);
+      structs.push(s);
+      items.push(s);
     } else if (isEnumDecl(stmt)) {
-      enums.push(lowerEnumDecl(stmt));
+      const e = lowerEnumDecl(stmt);
+      enums.push(e);
+      items.push(e);
     } else if (isBindingDecl(stmt)) {
-      bindings.push(lowerBindingDecl(stmt));
+      const b = lowerBindingDecl(stmt);
+      bindings.push(b);
+      items.push(b);
     } else if (isTypeAlias(stmt)) {
-      typeAliases.push(lowerTypeAlias(stmt));
+      const t = lowerTypeAlias(stmt);
+      typeAliases.push(t);
+      items.push(t);
     } else if (isNewtypeDecl(stmt)) {
-      newtypes.push(lowerNewtype(stmt));
+      const n = lowerNewtype(stmt);
+      newtypes.push(n);
+      items.push(n);
     } else if (isOpaqueDecl(stmt)) {
-      opaques.push(lowerOpaque(stmt));
+      const o = lowerOpaque(stmt);
+      opaques.push(o);
+      items.push(o);
     } else if (isTraitDecl(stmt)) {
-      traits.push(lowerTrait(stmt));
+      const t = lowerTrait(stmt);
+      traits.push(t);
+      items.push(t);
     } else if (isImplBlock(stmt)) {
-      impls.push(lowerImplBlock(stmt));
+      const i = lowerImplBlock(stmt);
+      impls.push(i);
+      items.push(i);
+    } else {
+      // Top-level executable statements and other legal constructs.
+      const lowered = lowerStatement(stmt);
+      items.push(lowered);
     }
   }
 
   return {
+    items,
     functions,
     structs,
     enums,
@@ -460,6 +495,7 @@ export function lowerProgram(ast: Program, sourceId: string): IRModule {
     traits,
     impls,
     entryPoints,
+    sourceFiles: [{ id: sourceId, displayName: sourceId }],
     sourceId,
     span: spanOf(ast),
   };

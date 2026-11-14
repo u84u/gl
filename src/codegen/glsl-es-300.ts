@@ -1,8 +1,9 @@
-import { Statement, isProgram } from "../types";
 import { Diagnostic } from "../typechecker";
+import { IRModule, IRModuleItem, IRAnonymousStruct } from "../ir/shader-ir";
 import {
   BackendCapabilities,
   ShaderTarget,
+  ShaderStage,
   GLSL_ES_300_CAPABILITIES,
 } from "./capabilities";
 import {
@@ -12,46 +13,44 @@ import {
   ShaderArtifact,
   defaultRegistry,
 } from "./backend";
-import { generateGLSL } from "./glsl";
-import { validateGLSLModule } from "./glsl";
+import { validateGLSLModuleIR, generateGLSLFromIR, glslType } from "./glsl";
 
 export class GlslEs300Backend implements ShaderCodegenBackend {
   readonly id: ShaderTarget = "glsl-es-300";
   readonly version = "3.00";
   readonly capabilities: BackendCapabilities = GLSL_ES_300_CAPABILITIES;
 
-  validate(ast: unknown, file: string): Diagnostic[] {
-    if (!isProgram(ast)) {
+  validate(module: IRModule, file: string): Diagnostic[] {
+    if (!module || !Array.isArray(module.items)) {
       return [{
         file,
         span: { line: 1, column: 1 },
-        message: "Invalid program passed to GLSL ES 3.00 backend",
-        code: "INVALID_PROGRAM",
+        message: "Invalid IR module passed to GLSL ES 3.00 backend",
+        code: "INVALID_MODULE",
         severity: "error",
       }];
     }
-    return validateGLSLModule(ast, file, this.capabilities);
+    return validateGLSLModuleIR(module, file, this.capabilities);
   }
 
   generate(
-    ast: unknown,
+    module: IRModule,
     _file: string,
     _options: CodegenOptions = {},
   ): BackendOutput {
-    if (!isProgram(ast)) {
+    if (!module || !Array.isArray(module.items)) {
       return {
         target: this.id,
         shaders: [],
         diagnostics: [{
           file: _file,
           span: { line: 1, column: 1 },
-          message: "Invalid program passed to GLSL ES 3.00 backend",
-          code: "INVALID_PROGRAM",
+          message: "Invalid IR module passed to GLSL ES 3.00 backend",
+          code: "INVALID_MODULE",
           severity: "error",
         }],
       };
     }
-    const program = ast;
     const diagnostics: Diagnostic[] = [];
     let code: string | null = null;
 
@@ -60,7 +59,7 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
     // (vectors, matrices, arrays, structs, etc.), so no separate scan is needed.
 
     try {
-      const glsl = generateGLSL(program, "glsl-es-300");
+      const glsl = generateGLSLFromIR(module, "glsl-es-300");
       // Prepend precision qualifier after version header for fragment shaders.
       const lines = glsl.split("\n");
       const versionIdx = lines.findIndex((l) =>
@@ -82,21 +81,44 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
 
     const shaders: ShaderArtifact[] = [];
     if (code) {
-      const mainStmt = program.statements.find(
-        (s): s is Extract<Statement, { kind: "FnDecl" }> =>
-          s.kind === "FnDecl" && s.name === "main",
+      const mainStmt = module.items.find(
+        (s): s is Extract<IRModuleItem, { kind: "fn" }> =>
+          s.kind === "fn" && s.name === "main",
       );
-      const stage = mainStmt?.stage ?? "fragment";
+      const stage = (mainStmt?.stage ?? "fragment") as ShaderStage;
+      const resources = module.items
+        .filter((s): s is Extract<IRModuleItem, { kind: "binding" }> => s.kind === "binding")
+        .map((b) => ({
+          name: b.name,
+          kind: (b.type.kind === "sampler") ? "sampler" : "uniformBuffer",
+          binding: b.binding,
+          set: 0,
+          stageVisibility: [stage],
+        }));
+      const inputs = mainStmt
+        ? mainStmt.params.map((p) => ({ name: p.name, type: glslType(p.type) }))
+        : [];
+      const outputs: { name: string; type: string }[] = [];
+      if (mainStmt && stage !== "compute") {
+        const rt = mainStmt.returnType;
+        if (rt.kind === "anonymousStruct") {
+          for (const f of (rt as IRAnonymousStruct).fields) {
+            outputs.push({ name: f.name, type: glslType(f.type) });
+          }
+        } else {
+          outputs.push({ name: "result", type: glslType(rt) });
+        }
+      }
       shaders.push({
         stage,
         entryPoint: "main",
         code,
         reflection: {
-          entryPoints: [],
-          resources: [],
+          entryPoints: [{ name: "main", stage, inputs, outputs }],
+          resources,
           uniforms: [],
         },
-      } as ShaderArtifact);
+      });
     }
 
     return {

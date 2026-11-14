@@ -7,7 +7,7 @@ Compiler for `gl`, a statically-typed shading language that transpiles to GLSL (
 | Command | Purpose |
 |---------|---------|
 | `npm run typecheck` | `tsc --noEmit` — strict, run before every change |
-| `npm test` | `vitest run` — full test suite (587 tests, 10 files) |
+| `npm test` | `vitest run` — full test suite |
 | `npm run coverage` | `vitest run --coverage` |
 | `npm run build` | `tsup` bundle to `dist/` (ESM only, clean output) |
 | `npm run build:validate` | Compiles C validator (needs system `libOSMesa`, `libGL`) |
@@ -19,26 +19,26 @@ No separate lint step. `tsconfig.json` is strict (`noUncheckedIndexedAccess`, `n
 
 ## Entry points
 
-- `src/index.ts` — `compileSync(options)` / `compileAsync(options)`: resolve imports → parse → typecheck → lower to IR → validate → codegen. Re-exports `tokenize`, `parse`, `typeCheck`, `generateGLSL`, `generateWGSL`.
+- `src/index.ts` — `compileSync(options)` / `compileAsync(options)`: resolve imports → parse → typecheck → lower to IR → validate → codegen. Re-exports `tokenize`, `parse`, `typeCheck`, `generateGLSL`, `generateWGSL`. `CompileResult` exposes `code` and `shaders`. Registry injectable via `options.registry`.
 - `src/cli.ts` — `gl <input.gl> [--target=glsl\|glsl-450\|glsl-es-300\|wgsl] [--output=<file>] [--format] [--check]` (Node-only)
-- `src/typechecker.ts` — `typeCheck(program, file)` → `Diagnostic[]`
+- `src/typechecker.ts` — `typeCheck(program, file, provenance?)` → `{ diagnostics }`
 - `tsup.config.ts` — ESM only, entries `src/index.ts`, `src/node/resolver.ts`, `src/browser/resolver.ts`, `src/cli.ts`
 - `src/modules/resolver.ts` — `SourceResolver` interface, `SourceModule`, `MemorySourceResolver`
-- `src/modules/graph.ts` — `collectModuleGraph()`: import traversal, cycle detection, declaration collection via resolver
-- `src/node/resolver.ts` — `NodeFileSourceResolver` (Node-only, fs/path confined to adapter)
+- `src/modules/graph.ts` — `collectModuleGraph()`: import traversal, cycle detection, declaration collection via resolver. Returns `{ statements, registry, provenance }`.
+- `src/node/resolver.ts` — `NodeFileSourceResolver` (Node-only, uses `node:fs/promises` and `node:path`)
 - `src/browser/resolver.ts` — `FetchSourceResolver` (browser, uses `fetch`)
-- `src/ir/shader-ir.ts` — backend-independent shader IR types
-- `src/ir/lower.ts` — AST → IR lowering
-- `src/ir/raise.ts` — IR → AST raise (compatibility layer)
+- `src/ir/shader-ir.ts` — backend-independent shader IR types (`IRModule`, `IRModuleItem`, `IRType`, `IRExpression`, `IRStatement`)
+- `src/ir/lower.ts` — AST → IR lowering (`lowerProgram`)
+- `src/ir/raise.ts` — IR → AST raise (`raiseProgram`)
 - `src/codegen/capabilities.ts` — `BackendCapabilities`, `ShaderTarget`, `ShaderStage`, `ScalarTypeName`
-- `src/codegen/backend.ts` — `ShaderCodegenBackend` interface, `BackendRegistry`, default registry
+- `src/codegen/backend.ts` — `ShaderCodegenBackend` interface, `BackendRegistry`, `defaultRegistry`, `createDefaultBackendRegistry`, `getBackend`
 - `src/codegen/glsl.ts` — GLSL 4.50 backend (`GlslBackend`) + `validateGLSLModule`
 - `src/codegen/glsl-es-300.ts` — GLSL ES 3.00 backend (`GlslEs300Backend`)
-- `src/codegen/wgsl.ts` — WGSL backend (`WgslBackend`) + `validateWGSLModule`
+- `src/codegen/wgsl.ts` — WGSL backend (`WgslBackend`) + `validateWGSLModule` + `validateWGSLModuleIR`
 
 Package exports: `.` (core), `./node` (Node resolver), `./browser` (fetch resolver), `./cli` (CLI).
 
-**Core purity**: `src/index.ts` and the module graph do not import `fs`, `path`, or any Node built-in at module scope. All host I/O goes through an injected `SourceResolver`.
+**Core purity**: `src/index.ts` and the module graph do not import `fs`, `path`, or any Node built-in at module scope. All host I/O goes through an injected `SourceResolver`. The Node resolver uses `node:fs/promises` and `node:path`.
 
 Pipeline: `resolve imports (via SourceResolver) → tokenize → parse → typeCheck → lower to IR → validate capabilities → codegen`.
 
@@ -67,25 +67,46 @@ Stage attributes: `@vertex fn main()`, `@fragment fn main()`, `@compute fn main(
 ## Public API
 
 ```ts
-compileSync({ target, source?, ast?, file?, sourceId? })       // sync; no imports in source
-compileAsync({ target, resolver, source?, ast?, file?, sourceId? })  // async; resolver required for imports
+compileSync({ target, source?, ast?, file?, sourceId?, registry?, provenance? })       // sync; no imports in source
+compileAsync({ target, resolver, source?, ast?, file?, sourceId?, registry?, provenance? })  // async; resolver required for imports
 compile({ target, source?, ast?, file? })                      // deprecated alias for compileSync
 ```
 
-Targets: `"glsl" \| "glsl-450" \| "glsl-es-300" \| "wgsl"`.
+Targets: `"glsl" \| "glsl-450" \| "glsl-es-300" \| "wgsl"` (type is `string`; custom targets can be registered).
 
 Source containing imports **must** use `compileAsync` with an injected `SourceResolver`; `compileSync` returns a diagnostic if imports are present.
+
+### CompileResult
+
+```ts
+interface CompileResult {
+  code: string | null;
+  shaders: ShaderArtifact[];  // full artifact list (code, stage, entryPoint, reflection)
+  ast: Program;
+  diagnostics: Diagnostic[];
+  target: string;
+}
+```
+
+### BackendRegistry
+
+- `register(backend)` — registers a backend; validates capability consistency (e.g. `supportsF16` must match `scalarTypes.has("f16")`).
+- `replace(backend)` — replaces an existing backend (same validation).
+- `get(id)` / `has(id)` / `ids()` — lookup by string target ID.
+- `createDefaultBackendRegistry()` — copies all built-in backends into a new registry.
+
+Backends implement `ShaderCodegenBackend` with `validate(module: IRModule, file)` and `generate(module: IRModule, file, options?)` — they consume `IRModule`, not `Program` AST.
 
 ## Type system quirks
 
 - **Abstract literals** (bare `2` / `1.0`) adapt to context; concrete typed values (`i32` vs `f32`) are never implicitly coerced — convert explicitly.
 - **No silent numeric narrowing**: backends reject unsupported scalar types (`i64`, `u64`, `f64`, `bf16` for WGSL/ES 3.00; etc.) with structured diagnostics instead of silently collapsing them to 32-bit types.
 - **`main` entry**: see shader stages above.
-- **Imports**: `import "./other.gl"` brings top-level `struct`/`fn`/`@binding`/`enum` declarations into scope. Circular imports handled via a visited set — do not reimplement.
+- **Imports**: `import "./other.gl"` brings top-level `struct`/`fn`/`@binding`/`enum`/`type`/`opaque`/`trait`/`impl` declarations into scope. Circular imports handled via a visited set — do not reimplement. `collectModuleGraph` returns a `provenance` map for imported diagnostics.
 
 ## Diagnostics
 
-Structured `Diagnostic` type: `file`, `code?`, `severity?` ("error"\|"warning"\|"info"\|"hint"), `message`, `span` ({line, column, endLine?, endColumn?}), `related?`, `help?`. Use `diagnostic(file, span, message, options?)` helper. Backend validation diagnostics include stable codes like `WGSL_UNSUPPORTED_SCALAR`, `GLSL_UNSUPPORTED_SCALAR`, `GLSL_ES_NO_DOUBLE`.
+Structured `Diagnostic` type: `file`, `code?`, `severity?` ("error"\|"warning"\|"info"\|"hint"), `message`, `span` ({line, column, endLine?, endColumn?}), `related?`, `help?`. Use `diagnostic(file, span, message, options?)` helper. Backend validation diagnostics include stable codes like `WGSL_UNSUPPORTED_SCALAR`, `WGSL_UNSUPPORTED_STAGE`, `GLSL_UNSUPPORTED_SCALAR`, `GLSL_ES_NO_DOUBLE`.
 
 ## Adding a language feature
 
@@ -93,8 +114,8 @@ Structured `Diagnostic` type: `file`, `code?`, `severity?` ("error"\|"warning"\|
 2. `types.ts`: add AST interface(s), add to `Statement`/`Expression`/`Type` unions
 3. `parser.ts`: add parsing method, wire into `declaration()`/`statement()`/`expression()`
 4. `typechecker.ts`: `typeOf()` for expressions, `typeCheckStatement()` for statements
-5. `src/ir/lower.ts` + `src/ir/raise.ts`: add IR node + lowering/raising
-6. `src/codegen/glsl.ts` / `src/codegen/glsl-es-300.ts` / `src/codegen/wgsl.ts`: `emitStatement()` and/or `emitExpression()` + target validation
+5. `src/ir/lower.ts` + `src/ir/raise.ts`: add IR node + lowering/raising (handle `IRModuleItem` in `lowerProgram`/`raiseProgram`)
+6. `src/codegen/glsl.ts` / `src/codegen/glsl-es-300.ts` / `src/codegen/wgsl.ts`: `emitStatement()` and/or `emitExpression()` + target validation (validate against `IRModule`)
 7. `formatter.ts`: `formatStatement()` and/or `formatExpression()`
 8. `*.test.ts`: add tests
 9. Run `npm run typecheck`, `npm test`, `npm run build`, `npm run validate`

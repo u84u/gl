@@ -21,14 +21,59 @@ See `LANGUAGE.md` for the full language reference, shader stages, imports, and b
 ## Library API
 
 ```ts
-import { compile } from "@u84u/gl";
+import { compileSync } from "@u84u/gl";
 
-const { code, diagnostics } = compile({
+const result = compileSync({
   target: "wgsl",
   source: `fn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,
   file: "shader.gl",
 });
+
+if (result.diagnostics.some((d) => d.severity === "error")) {
+  // handle diagnostics
+} else {
+  // result.code is the legacy single-output convenience path
+  // result.shaders contains the complete artifact list with reflection
+  console.log(result.shaders[0]?.code);
+}
 ```
+
+### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `target` | `string` | Backend target ID: `"glsl"`, `"glsl-450"`, `"glsl-es-300"`, `"wgsl"` (or a custom registered target) |
+| `file` | `string` | Source file identity for diagnostics |
+| `sourceId` | `string` | Stable canonical identity for the main source (defaults to `file`) |
+| `source` | `string` | Source text to parse and compile (mutually exclusive with `ast`) |
+| `ast` | `Program` | Pre-built AST to type-check and codegen (mutually exclusive with `source`) |
+| `resolver` | `SourceResolver` | Required for `compileAsync` when source contains imports |
+| `registry` | `BackendRegistry` | Optional backend registry (defaults to the shared default registry) |
+| `provenance` | `Map<Statement, string>` | Maps statements to source files for imported-module diagnostics |
+
+### Entry points
+
+- `compileSync(options)` — sync; no imports in source. Returns `CompileResult`.
+- `compileAsync(options)` — async; `resolver` required when source contains imports. Returns `Promise<CompileResult>`.
+- `compile(options)` — deprecated alias for `compileSync`.
+
+### CompileResult
+
+```ts
+interface CompileResult {
+  code: string | null;        // convenience: first shader's code, or null
+  shaders: ShaderArtifact[];  // full artifact list with code, stage, entry point, reflection
+  ast: Program;               // type-checked program
+  diagnostics: Diagnostic[];  // structured diagnostics
+  target: string;             // resolved target ID
+}
+```
+
+Each `ShaderArtifact` includes `stage`, `entryPoint`, `code`, and `reflection` (entry points, resources, uniforms).
+
+### Custom backends
+
+Backends register themselves in a `BackendRegistry`. Use `createDefaultBackendRegistry()` to copy the built-in registry, then `registry.register(backend)` or `registry.replace(backend)` to add or override targets. Pass your registry via `options.registry`.
 
 Package entry points: `@u84u/gl` (core), `@u84u/gl/node` (filesystem resolver), `@u84u/gl/browser` (fetch resolver), `@u84u/gl/cli`.
 
@@ -38,7 +83,7 @@ Package entry points: `@u84u/gl` (core), `@u84u/gl/node` (filesystem resolver), 
 npm install          # dependencies
 npm run build        # tsup bundle to dist/ (ESM)
 npm run typecheck    # tsc --noEmit (strict)
-npm test             # vitest — 587 tests
+npm test             # vitest — full test suite
 npm run validate     # build & run C shader validator (needs libOSMesa, libGL)
 ```
 
