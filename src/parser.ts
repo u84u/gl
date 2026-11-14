@@ -39,6 +39,7 @@ import {
   OpaqueDecl,
 } from "./types";
 import { Token, TokenKind } from "./lexer";
+import type { ShaderStage } from "./codegen/capabilities";
 
 export class ParseError extends Error {
   constructor(public token: Token, message: string) {
@@ -70,6 +71,16 @@ export class Parser {
   }
 
   private declaration(): Statement {
+    // Handle stage attributes before fn: @vertex fn main(): vec4
+    if (this.check("Binding")) {
+      const attr = this.peek();
+      const text = attr.lexeme;
+      if (text === "vertex" || text === "fragment" || text === "compute") {
+        this.advance(); // consume the stage attribute
+        this.consume("Fn", "Expect 'fn' after stage attribute.");
+        return this.functionDeclaration(null, text as ShaderStage);
+      }
+    }
     if (this.match("Struct")) {
       // Check if this is a newtype: struct Name(Type)
       if (this.check("Ident") && this.peekNextKind() === "LParen") {
@@ -116,7 +127,10 @@ export class Parser {
     return { kind: "NewtypeDecl", name: name.lexeme, innerType, span: startSpan };
   }
 
-  private functionDeclaration(selfType: Type | null = null): FnDecl {
+  private functionDeclaration(
+    selfType: Type | null = null,
+    stage: ShaderStage = "fragment",
+  ): FnDecl {
     const fnToken = this.previous();
     const startSpan = this.spanOf(fnToken);
     const name = this.consume("Ident", "Expect function name after 'fn'.");
@@ -134,11 +148,25 @@ export class Parser {
       } while (this.match("Comma"));
     }
     this.consume("RParen", "Expect ')' after parameters.");
-    this.consume("Colon", "Expect ':' before return type.");
-    const returnType = this.type();
+    let returnType: Type;
+    if (stage === "compute" && !this.check("Colon")) {
+      // Compute main has no return type (void). Use a dummy scalar type.
+      returnType = { kind: "scalar", name: "f32" };
+    } else {
+      this.consume("Colon", "Expect ':' before return type.");
+      returnType = this.type();
+    }
     this.consume("LBrace", "Expect '{' before function body.");
     const body = this.block();
-    return { kind: "FnDecl", name: name.lexeme, params, returnType, body, span: startSpan };
+    return {
+      kind: "FnDecl",
+      name: name.lexeme,
+      params,
+      returnType,
+      body,
+      stage,
+      span: startSpan,
+    };
   }
 
   private bindingDeclaration(): BindingDecl {

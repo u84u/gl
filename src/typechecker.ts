@@ -8,7 +8,6 @@ import {
   FnDecl,
   BindingDecl,
   Block,
-  ArrayLiteral,
   // Type guards
   isScalar,
   isVector,
@@ -27,15 +26,54 @@ import {
   // Expression guards (only ones used outside visitor)
   isIdentifier,
   isLiteralOfKind,
+  isArrayLiteral,
   // Visitor
   visitStatement,
   visitExpression,
+  assertNever,
 } from "./types";
+
+export type DiagnosticSeverity = "error" | "warning" | "info" | "hint";
 
 export interface Diagnostic {
   file: string;
-  span: Span;
+  code?: string;
+  severity?: DiagnosticSeverity;
   message: string;
+  span: Span;
+  related?: Diagnostic[];
+  help?: string;
+}
+
+/**
+ * Builds a structured diagnostic with defaults for code and severity.
+ *
+ * @param file - The source file identity.
+ * @param span - The primary source location.
+ * @param message - The human-readable message.
+ * @param options - Optional code, severity, related locations, and help text.
+ * @returns A structured Diagnostic.
+ */
+export function diagnostic(
+  file: string,
+  span: Span,
+  message: string,
+  options?: {
+    code?: string;
+    severity?: DiagnosticSeverity;
+    related?: Diagnostic[];
+    help?: string;
+  },
+): Diagnostic {
+  return {
+    file,
+    span,
+    message,
+    code: options?.code,
+    severity: options?.severity ?? "error",
+    related: options?.related,
+    help: options?.help,
+  };
 }
 
 export interface Symbol {
@@ -79,6 +117,10 @@ const BITWISE_OPS = new Set(["&", "|", "^", "<<", ">>"]);
 const SPACESHIP_OPS = new Set(["<=>"]);
 const INT_TYPES = new Set(["i32", "u32", "i64", "u64", "i8", "u8", "i16", "u16"]);
 const SWIZZLE_VALID = new Set("xyzwrgba");
+
+// Compound assignment operator categories — module scope to avoid reallocation.
+const COMPOUND_ARITH_OPS = new Set(["+=", "-=", "*=", "/=", "%="]);
+const COMPOUND_BITWISE_OPS = new Set(["&=", "|=", "^=", "<<=", ">>="]);
 
 /**
  * Looks up a symbol by name, searching the current scope and its parents.
@@ -225,13 +267,15 @@ function concretify(
       (isAbstractInt(type.element) || isAbstractFloat(type.element)) &&
       !isAbstractInt(expectedType.element) &&
       !isAbstractFloat(expectedType.element)) {
-    const arr = expr as ArrayLiteral;
-    const newElements = arr.elements.map((e) => {
+    if (!isArrayLiteral(expr)) {
+      return { expr, type };
+    }
+    const newElements = expr.elements.map((e) => {
       const result = concretify(ctx, e, expectedType.element);
       return result ? result.expr : e;
     });
     const concretizedType: Type = { kind: "array", element: expectedType.element, size: type.size };
-    return { expr: { ...arr, elements: newElements } as ArrayLiteral, type: concretizedType };
+    return { expr: { ...expr, elements: newElements }, type: concretizedType };
   }
   return { expr, type };
 }
@@ -403,6 +447,9 @@ function typeOf(ctx: TypeCheckContext, expr: Expression): Type {
       if (components.length === 1) {
         return { kind: "scalar", name: objectType.element };
       }
+      if (components.length < 2 || components.length > objectType.size) {
+        return { kind: "scalar", name: objectType.element };
+      }
       return { kind: "vector", element: objectType.element, size: components.length as 2 | 3 | 4 };
     },
     visitIndexExpr: (node) => {
@@ -515,9 +562,7 @@ function typeOf(ctx: TypeCheckContext, expr: Expression): Type {
       const targetType = typeOf(ctx, node.target);
       const concretized = concretify(ctx, node.value, targetType);
       const valueType = concretized ? concretized.type : typeOf(ctx, node.value);
-      const arithOps = new Set(["+=", "-=", "*=", "/=", "%="]);
-      const bitwiseOps = new Set(["&=", "|=", "^=", "<<=", ">>="]);
-      if (arithOps.has(node.operator)) {
+      if (COMPOUND_ARITH_OPS.has(node.operator)) {
         if (!concretized || typesDiffer(targetType, valueType)) {
           ctx.diagnostics.push({
             file: ctx.file,
@@ -527,7 +572,7 @@ function typeOf(ctx: TypeCheckContext, expr: Expression): Type {
         }
         return targetType;
       }
-      if (bitwiseOps.has(node.operator)) {
+      if (COMPOUND_BITWISE_OPS.has(node.operator)) {
         if (
           (isScalar(targetType) && INT_TYPES.has(targetType.name)) ||
           (isVector(targetType) && INT_TYPES.has(targetType.element))
@@ -659,8 +704,11 @@ function typesDiffer(a: Type, b: Type): boolean {
         typesDiffer((a as Extract<Type, { kind: "array" }>).element, (b as Extract<Type, { kind: "array" }>).element);
     case "quaternion":
       return false;
-    default:
+    case "abstractInt":
+    case "abstractFloat":
       return false;
+    default:
+      return assertNever(a as never);
   }
 }
 
@@ -1322,6 +1370,41 @@ function typeCheckFunction(ctx: TypeCheckContext, fn: FnDecl): void {
   const prevReturn = ctx.currentFnReturnType;
   ctx.scope = fnScope;
   ctx.currentFnReturnType = fn.returnType;
+
+  // Stage-specific entry-point signature validation for `main`.
+  if (fn.name === "main" && fn.stage) {
+    if (fn.params.length > 0) {
+      ctx.diagnostics.push({
+        file: ctx.file,
+        span: fn.span,
+        message: `main for stage '${fn.stage}' must take no parameters`,
+        severity: "error",
+      });
+    }
+    if (fn.stage === "fragment") {
+      if (!isVector(fn.returnType) || fn.returnType.size !== 4) {
+        if (!(isStructType(fn.returnType))) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: fn.span,
+            message: `fragment main must return vec4 or a struct, got ${typeName(fn.returnType)}`,
+            severity: "error",
+          });
+        }
+      }
+    } else if (fn.stage === "vertex") {
+      if (!isVector(fn.returnType) || fn.returnType.size !== 4) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: fn.span,
+          message: `vertex main must return vec4 (position), got ${typeName(fn.returnType)}`,
+          severity: "error",
+        });
+      }
+    } else if (fn.stage === "compute") {
+      // Compute main does not return a meaningful value to the pipeline.
+    }
+  }
 
   for (const param of fn.params) {
     define(ctx, {

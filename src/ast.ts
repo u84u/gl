@@ -52,6 +52,7 @@ import type {
   ImplBlock,
 } from "./types";
 import { literal } from "./types";
+import type { ShaderStage } from "./codegen/capabilities";
 
 const DEFAULT_SPAN = { line: 1, column: 1 } as const;
 
@@ -504,8 +505,17 @@ export function fnDecl(
   params: Param[],
   returnType: Type,
   body: Block,
+  stage: ShaderStage = "fragment",
 ): FnDecl {
-  return { kind: "FnDecl", name, params, returnType, body, span: DEFAULT_SPAN };
+  return {
+    kind: "FnDecl",
+    name,
+    params,
+    returnType,
+    body,
+    stage,
+    span: DEFAULT_SPAN,
+  };
 }
 
 /**

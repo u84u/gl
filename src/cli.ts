@@ -1,14 +1,12 @@
-import { compile } from "./index";
+import { compileAsync } from "./index";
 import { format } from "./formatter";
+import { NodeFileSourceResolver } from "./node/resolver";
+import { resolve } from "path";
 import { version } from "../package.json";
 
-/**
- * CLI entry point for the gl shader compiler.
- * Parses command-line arguments and drives compile/format/check operations.
- */
 const args = process.argv.slice(2);
 let inputFile = "";
-let target: "glsl" | "wgsl" = "glsl";
+let target: "glsl" | "glsl-es-300" | "glsl-450" | "wgsl" = "glsl";
 let outputFile: string | null = null;
 let formatMode = false;
 let checkMode = false;
@@ -19,12 +17,12 @@ for (let i = 0; i < args.length; i++) {
   if (!arg) continue;
   if (arg.startsWith("--target=")) {
     const t = arg.slice("--target=".length);
-    if (t === "glsl" || t === "wgsl") target = t;
+    if (t === "glsl" || t === "wgsl" || t === "glsl-450" || t === "glsl-es-300") target = t;
   } else if (arg === "--target" || arg === "-t") {
     i++;
     if (i < args.length) {
       const t = args[i];
-      if (t === "glsl" || t === "wgsl") target = t;
+      if (t === "glsl" || t === "wgsl" || t === "glsl-450" || t === "glsl-es-300") target = t;
     }
   } else if (arg.startsWith("--output=")) {
     outputFile = arg.slice("--output=".length);
@@ -69,7 +67,14 @@ try {
     process.exit(0);
   }
 
-  const { code, diagnostics } = compile({ source, target, file: inputFile });
+  const resolver = new NodeFileSourceResolver(resolve(inputFile));
+  const { code, diagnostics } = await compileAsync({
+    source,
+    target,
+    sourceId: inputFile,
+    file: inputFile,
+    resolver,
+  });
 
   for (const d of diagnostics) {
     const lines = source.split("\n");

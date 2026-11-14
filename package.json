@@ -1,7 +1,7 @@
 {
   "name": "@u84u/gl",
   "version": "0.1.0",
-  "description": "Compiler for the gl shading language, transpiling to GLSL (and WGSL later)",
+  "description": "Compiler for the gl shading language, transpiling to GLSL (450, ES 3.00) and WGSL",
   "main": "dist/index.js",
   "bin": {
     "gl": "dist/cli.js"
@@ -9,6 +9,12 @@
   "files": [
     "dist"
   ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./node": "./dist/node/resolver.js",
+    "./browser": "./dist/browser/resolver.js",
+    "./cli": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",

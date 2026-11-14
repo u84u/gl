@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { compile } from "../src/index";
+import { compile, compileAsync } from "../src/index";
+import { NodeFileSourceResolver } from "../src/node/resolver";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, "fixtures", "gl");
@@ -26,11 +27,24 @@ function getFixtureNames(): string[] {
 describe("golden-file GLSL output", () => {
   const names = getFixtureNames();
   for (const name of names) {
-    it(`matches golden output for ${name}`, () => {
-      const source = readFileSync(join(fixturesDir, `${name}.gl`), "utf-8");
+    it(`matches golden output for ${name}`, async () => {
+      const file = join(fixturesDir, `${name}.gl`);
+      const source = readFileSync(file, "utf-8");
       const expected = readFileSync(join(expectedDir, `${name}.glsl`), "utf-8");
 
-      const result = compile({ source, target: "glsl", file: join(fixturesDir, `${name}.gl`) });
+      let result;
+      if (source.includes("import")) {
+        const resolver = new NodeFileSourceResolver(fixturesDir);
+        result = await compileAsync({
+          source,
+          target: "glsl",
+          sourceId: file,
+          file,
+          resolver,
+        });
+      } else {
+        result = compile({ source, target: "glsl", file });
+      }
 
       expect(result.diagnostics).toEqual([]);
       expect(result.code).toBe(expected);

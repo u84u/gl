@@ -2,6 +2,7 @@ import {
   BindingDecl,
   Expression,
   Program,
+  Span,
   Statement,
   StructDecl,
   Type,
@@ -47,7 +48,25 @@ import {
   isPanicStmt,
   isUnreachableStmt,
   isDiscardStmt,
+  isTypeAlias,
+  isNewtypeDecl,
+  isProgram,
 } from "../types";
+import { Diagnostic, diagnostic } from "../typechecker";
+import {
+  BackendCapabilities,
+  ShaderTarget,
+  WGSL_CAPABILITIES,
+  scalarIsSupported,
+  ScalarTypeName,
+} from "./capabilities";
+import {
+  ShaderCodegenBackend,
+  CodegenOptions,
+  BackendOutput,
+  ShaderArtifact,
+  defaultRegistry,
+} from "./backend";
 
 const SCALAR_MAP: Record<string, string> = {
   i8: "i32",
@@ -56,12 +75,8 @@ const SCALAR_MAP: Record<string, string> = {
   u16: "u32",
   i32: "i32",
   u32: "u32",
-  i64: "i32",
-  u64: "u32",
-  f16: "f32",
+  f16: "f16",
   f32: "f32",
-  f64: "f32",
-  bf16: "f32",
   bool: "bool",
 };
 
@@ -125,6 +140,164 @@ const MAT_PREFIX_MAP: Record<string, string> = {
   u64: "u",
   bool: "b",
 };
+
+/**
+ * Recursively collects every Type node nested inside a type expression.
+ *
+ * @param t - The type to walk.
+ * @param out - The array to append collected types to.
+ */
+function collectTypes(t: Type, out: Type[]): void {
+  out.push(t);
+  if (isVector(t)) {
+    // Vectors carry an element type name, not a nested Type node.
+    return;
+  }
+  if (isMatrix(t)) {
+    return;
+  }
+  if (isArray(t)) {
+    collectTypes(t.element, out);
+    return;
+  }
+  if (t.kind === "tuple") {
+    for (const element of t.elements) {
+      collectTypes(element, out);
+    }
+    return;
+  }
+  if (t.kind === "option") {
+    collectTypes(t.element, out);
+    return;
+  }
+  if (t.kind === "result") {
+    collectTypes(t.ok, out);
+    collectTypes(t.err, out);
+    return;
+  }
+  if (t.kind === "anonymousStruct") {
+    for (const field of t.fields) {
+      collectTypes(field.type, out);
+    }
+    return;
+  }
+  if (t.kind === "union") {
+    for (const member of t.members) {
+      collectTypes(member, out);
+    }
+    return;
+  }
+}
+
+/**
+ * Validates that every type in the program is supported by the WGSL backend.
+ *
+ * WGSL does not support i64, u64, f64, or bf16 scalars. Emitting them would
+ * require silent narrowing, which is not permitted. Returns diagnostics for
+ * every unsupported scalar type found.
+ *
+ * @param program - The program to validate.
+ * @returns Diagnostics for unsupported types, or an empty array if valid.
+ */
+export function validateWGSLModule(
+  program: Program,
+  file: string,
+  capabilities: BackendCapabilities = WGSL_CAPABILITIES,
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const seen = new Set<Type>();
+
+  function checkType(t: Type, span: Span): void {
+    const nested: Type[] = [];
+    collectTypes(t, nested);
+    for (const nt of nested) {
+      if (seen.has(nt)) continue;
+      seen.add(nt);
+      if (isScalar(nt)) {
+        const name = nt.name as ScalarTypeName;
+        if (!scalarIsSupported(capabilities, name)) {
+          diagnostics.push(
+            diagnostic(
+              file,
+              span,
+              `WGSL does not support scalar type '${name}'`,
+              {
+                code: "WGSL_UNSUPPORTED_SCALAR",
+                severity: "error",
+                help: `Convert to a supported type (${Array.from(capabilities.scalarTypes).join(", ")}) or use an explicit cast.`,
+              },
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Recursively walks all statements, checking declarations and descending
+   * into nested blocks, function bodies, and control-flow branches.
+   */
+  function walkStatements(stmts: Statement[]): void {
+    for (const stmt of stmts) {
+      if (isVarDecl(stmt)) {
+        checkType(stmt.type, stmt.span);
+      }
+      if (isBindingDecl(stmt)) {
+        checkType(stmt.type, stmt.span);
+      }
+      if (isFnDecl(stmt)) {
+        for (const param of stmt.params) {
+          checkType(param.type, stmt.span);
+        }
+        checkType(stmt.returnType, stmt.span);
+        walkStatements(stmt.body.statements);
+      }
+      if (isStructDecl(stmt)) {
+        for (const field of stmt.fields) {
+          checkType(field.type, stmt.span);
+        }
+      }
+      if (isEnumDecl(stmt)) {
+        for (const variant of stmt.variants) {
+          if (variant.type) {
+            checkType(variant.type, stmt.span);
+          }
+        }
+      }
+      if (isTypeAlias(stmt)) {
+        checkType(stmt.type, stmt.span);
+      }
+      if (isNewtypeDecl(stmt)) {
+        checkType(stmt.innerType, stmt.span);
+      }
+      if (isBlock(stmt)) {
+        walkStatements(stmt.statements);
+      }
+      if (isIfStmt(stmt)) {
+        walkStatements(stmt.thenBranch.statements);
+        if (stmt.elseBranch) {
+          walkStatements(stmt.elseBranch.statements);
+        }
+      }
+      if (isWhileStmt(stmt)) {
+        walkStatements(stmt.body.statements);
+      }
+      if (isForStmt(stmt)) {
+        walkStatements(stmt.body.statements);
+      }
+      if (isDoWhileStmt(stmt)) {
+        walkStatements(stmt.body.statements);
+      }
+      if (isLoopStmt(stmt)) {
+        walkStatements(stmt.body.statements);
+      }
+    }
+  }
+
+  walkStatements(program.statements);
+
+  return diagnostics;
+}
 
 interface SamplerInfo {
   samplerBinding: number;
@@ -301,22 +474,46 @@ export function generateWGSL(program: Program): string {
     lines.push("");
   }
 
-  if (isVector(returnType) && returnType.size === 4) {
-    lines.push("@fragment");
-    lines.push("fn main() -> @location(0) vec4<f32> {");
-    for (const s of mainFn.body.statements) {
-      emitStatement(lines, s, 1, ctx);
+  const stage = mainFn.stage ?? "fragment";
+
+  if (stage === "fragment") {
+    if (isVector(returnType) && returnType.size === 4) {
+      lines.push("@fragment");
+      lines.push("fn main() -> @location(0) vec4<f32> {");
+      for (const s of mainFn.body.statements) {
+        emitStatement(lines, s, 1, ctx);
+      }
+      lines.push("}");
+    } else if (isStructType(returnType)) {
+      lines.push("@fragment");
+      lines.push(`fn main() -> ${returnType.name} {`);
+      for (const s of mainFn.body.statements) {
+        emitStatement(lines, s, 1, ctx);
+      }
+      lines.push("}");
+    } else {
+      throw new Error("fragment main must return vec4 or a struct");
     }
-    lines.push("}");
-  } else if (isStructType(returnType)) {
-    lines.push("@fragment");
-    lines.push(`fn main() -> ${returnType.name} {`);
+  } else if (stage === "vertex") {
+    if (isVector(returnType) && returnType.size === 4) {
+      lines.push("@vertex");
+      lines.push("fn main() -> @builtin(position) vec4<f32> {");
+      for (const s of mainFn.body.statements) {
+        emitStatement(lines, s, 1, ctx);
+      }
+      lines.push("}");
+    } else {
+      throw new Error("vertex main must return vec4 (position)");
+    }
+  } else if (stage === "compute") {
+    lines.push("@compute @workgroup_size(1, 1, 1)");
+    lines.push("fn main() {");
     for (const s of mainFn.body.statements) {
       emitStatement(lines, s, 1, ctx);
     }
     lines.push("}");
   } else {
-    throw new Error("main must return vec4 or a struct for fragment shaders");
+    throw new Error(`Unknown shader stage: ${stage}`);
   }
 
   return lines.join("\n") + "\n";
@@ -904,3 +1101,88 @@ function charToCode(s: string): number {
     default: return 0;
   }
 }
+
+/**
+ * WGSL code-generation backend for WebGPU.
+ */
+export class WgslBackend implements ShaderCodegenBackend {
+  readonly id: ShaderTarget = "wgsl";
+  readonly version = "1.0";
+  readonly capabilities: BackendCapabilities = WGSL_CAPABILITIES;
+
+  validate(ast: unknown, file: string): Diagnostic[] {
+    if (!isProgram(ast)) {
+      return [{
+        file,
+        span: { line: 1, column: 1 },
+        message: "Invalid program passed to WGSL backend",
+        code: "INVALID_PROGRAM",
+        severity: "error",
+      }];
+    }
+    return validateWGSLModule(ast, file, this.capabilities);
+  }
+
+  generate(
+    ast: unknown,
+    _file: string,
+    _options: CodegenOptions = {},
+  ): BackendOutput {
+    if (!isProgram(ast)) {
+      return {
+        target: this.id,
+        shaders: [],
+        diagnostics: [{
+          file: _file,
+          span: { line: 1, column: 1 },
+          message: "Invalid program passed to WGSL backend",
+          code: "INVALID_PROGRAM",
+          severity: "error",
+        }],
+      };
+    }
+    const program = ast;
+    const diagnostics: Diagnostic[] = [];
+    let code: string | null = null;
+
+    try {
+      code = generateWGSL(program);
+    } catch (err) {
+      diagnostics.push({
+        file: _file,
+        span: { line: 1, column: 1 },
+        message: err instanceof Error ? err.message : String(err),
+        severity: "error",
+      });
+    }
+
+    const shaders: ShaderArtifact[] = [];
+    if (code) {
+      const mainStmt = program.statements.find(
+        (s): s is Extract<Statement, { kind: "FnDecl" }> =>
+          s.kind === "FnDecl" && s.name === "main",
+      );
+      const stage = mainStmt?.stage ?? "fragment";
+      shaders.push({
+        stage,
+        entryPoint: "main",
+        code,
+        reflection: {
+          entryPoints: [],
+          resources: [],
+          uniforms: [],
+        },
+      } as ShaderArtifact);
+    }
+
+    return {
+      target: this.id,
+      shaders,
+      diagnostics,
+    };
+  }
+}
+
+export const wgslBackend = new WgslBackend();
+defaultRegistry.register(wgslBackend);
+

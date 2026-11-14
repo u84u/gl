@@ -872,6 +872,7 @@ describe("typechecker", () => {
         {
           kind: "FnDecl",
           name: "main",
+          stage: "fragment",
           params: [],
           returnType: { kind: "vector", element: "f32", size: 4 },
           body: {
@@ -955,6 +956,7 @@ describe("typechecker", () => {
         {
           kind: "FnDecl",
           name: "main",
+          stage: "fragment",
           params: [],
           returnType: { kind: "vector", element: "f32", size: 4 },
           body: {

@@ -1,6 +1,10 @@
+import type { ShaderStage } from "./codegen/capabilities";
+
 export type Span = {
   line: number;
   column: number;
+  endLine?: number;
+  endColumn?: number;
 };
 
 // =====================================================================
@@ -272,7 +276,7 @@ export interface StructDecl {
 export interface EnumDecl {
   kind: "EnumDecl";
   name: string;
-  variants: { name: string; type: Type | null }[];
+  variants: { name: string; type: Type | null; span?: Span }[];
   span: Span;
 }
 
@@ -318,6 +322,7 @@ export interface FnDecl {
   params: Param[];
   returnType: Type;
   body: Block;
+  stage?: ShaderStage;
   span: Span;
 }
 
@@ -692,6 +697,15 @@ export function isImportDecl(s: Statement): s is ImportDecl {
   return s.kind === "ImportDecl";
 }
 
+export function isProgram(node: unknown): node is Program {
+  return (
+    typeof node === "object" &&
+    node !== null &&
+    "kind" in node &&
+    (node as { kind: unknown }).kind === "Program"
+  );
+}
+
 // =====================================================================
 // Expression type guards
 // =====================================================================
@@ -837,6 +851,7 @@ export function visitStatement<R>(node: Statement, visitor: StatementVisitor<R>)
     case "BindingDecl": return visitor.visitBindingDecl(node);
     case "ImportDecl": return visitor.visitImportDecl(node);
   }
+  return assertNever(node);
 }
 
 /**
@@ -862,4 +877,14 @@ export function visitExpression<R>(node: Expression, visitor: ExpressionVisitor<
     case "MatchExpr": return visitor.visitMatchExpr(node);
     case "BlockExpr": return visitor.visitBlockExpr(node);
   }
+  return assertNever(node);
+}
+
+/**
+ * Exhaustiveness guard for switch statements over discriminated unions.
+ * Adding a new union member without updating the switch raises at compile time
+ * (via `never`) and at runtime if reached.
+ */
+export function assertNever(x: never): never {
+  throw new Error(`Unhandled union member: ${JSON.stringify(x)}`);
 }
