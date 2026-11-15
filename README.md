@@ -4,10 +4,8 @@ Compile `gl`, a statically-typed shading language, to GLSL (450 core, ES 3.00) o
 
 ## Install
 
-Not on npm. Install from GitHub:
-
 ```bash
-npm install github:u84u/gl
+npm install @u84u/gl
 ```
 
 ## CLI
