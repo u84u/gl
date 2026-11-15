@@ -1,0 +1,31 @@
+struct Uniforms {
+  vec4 color,
+  vec4 rect,
+  f32 radius,
+}
+
+@binding(0) uniform uniforms: Uniforms;
+
+struct VertexOutput {
+  @builtin(position) vec4 position,
+  @location(0) vec4 color,
+}
+
+@vertex
+fn main(@location(0) position: vec2): VertexOutput {
+  let ndc_x: f32 = uniforms.rect.x * 2.0 - 1.0;
+  let ndc_y: f32 = 1.0 - uniforms.rect.y * 2.0;
+  let ndc_w: f32 = uniforms.rect.z * 2.0;
+  let ndc_h: f32 = uniforms.rect.w * 2.0;
+  let pos: vec2 = position * vec2(ndc_w, ndc_h) + vec2(ndc_x, ndc_y - ndc_h);
+
+  let mut output: VertexOutput;
+  output.position = vec4(pos, 0.0, 1.0);
+  output.color = uniforms.color;
+  return output;
+}
+
+@fragment
+fn main(@location(0) color: vec4): vec4 {
+  return color;
+}

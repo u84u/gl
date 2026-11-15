@@ -35,13 +35,22 @@ Compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>
 
 `@fragment fn main()` — default stage. Returns `vec4` → `out vec4 fragColor` (GLSL) / `@location(0) vec4<f32>` (WGSL).
 
-`@vertex fn main()` — returns `vec4` → writes the built-in `gl_Position` (GLSL, no `out` declaration) / `@builtin(position) vec4<f32>` (WGSL).
+`@vertex fn main()` — returns `vec4` → writes the built-in `gl_Position` (GLSL, no `out` declaration) / `@builtin(position) vec4<f32>` (WGSL). May also return an output struct containing a `@builtin(position)` field plus `@location(N)` varying fields.
 
 `@compute fn main()` — no return → `void main()` (GLSL) / `fn main()` (WGSL) with `@workgroup_size(1, 1, 1)`.
 
-## Struct returns
+### Entry-point parameters
 
-Struct-returning `main` lowers to multiple `layout(location = N) out` vars (GLSL) or a returned struct (WGSL).
+`@vertex` and `@fragment` `main` may take parameters. Each parameter requires an explicit attribute:
+
+- `@location(N)` — a vertex-buffer input (vertex) or interpolated varying input (fragment).
+- `@builtin(...)` — a built-in input, e.g. `@builtin(position)` on a vertex input (if supported).
+
+Locations must be unique within a stage; a staged parameter without `@location`/`@builtin` is a compile error.
+
+### Struct returns
+
+Struct-returning `main` lowers to multiple `layout(location = N) out` vars (GLSL) or a returned struct (WGSL). A vertex output struct must include a `@builtin(position)` field (mapped to `gl_Position` in GLSL); its `@location(N)` fields are emitted as varyings (GLSL) / struct fields (WGSL). Fragment output structs keep working: their fields become per-location outputs.
 
 ```gl
 struct FragOutput { f32 r, f32 g, f32 b, f32 a, f32 depth }
@@ -51,10 +60,92 @@ fn main(): FragOutput {
 }
 ```
 
-## Imports
+## Fragment varyings
 
-`import "./other.gl"` brings top-level `struct`, `fn`, `@binding`, `enum`, `type`, `opaque`, `trait`, `impl` declarations into scope. Circular imports are handled via a visited set — no re-imports.
+Fragment `main` parameters declared with `@location(N)` are interpolated inputs from the vertex stage. Vertex `@location(N)` outputs are the matching varyings.
+
+## Two entry points in one file
+
+A single `.gl` source may declare both `@vertex fn main(...)` and `@fragment fn main(...)`. `compileSync`/`compileAsync` emit one shader artifact per entry point (`result.shaders`, in source order), each standalone with its own header and entry point. A file with only one `main` still produces a single artifact.
+
+### `shape.gl` — rounded/filled rectangle
+
+```gl
+struct Uniforms {
+  vec4 color,
+  vec4 rect,
+  f32 radius,
+}
+
+@binding(0) uniform uniforms: Uniforms;
+
+struct VertexOutput {
+  @builtin(position) vec4 position,
+  @location(0) vec4 color,
+}
+
+@vertex
+fn main(@location(0) position: vec2): VertexOutput {
+  let ndc_x: f32 = uniforms.rect.x * 2.0 - 1.0;
+  let ndc_y: f32 = 1.0 - uniforms.rect.y * 2.0;
+  let ndc_w: f32 = uniforms.rect.z * 2.0;
+  let ndc_h: f32 = uniforms.rect.w * 2.0;
+  let pos: vec2 = position * vec2(ndc_w, ndc_h) + vec2(ndc_x, ndc_y - ndc_h);
+
+  let mut output: VertexOutput;
+  output.position = vec4(pos, 0.0, 1.0);
+  output.color = uniforms.color;
+  return output;
+}
+
+@fragment
+fn main(@location(0) color: vec4): vec4 {
+  return color;
+}
+```
+
+### `text.gl` — textured glyph quads
+
+```gl
+struct Uniforms {
+  vec4 color,
+  vec4 rect,
+  vec4 uv_rect,
+}
+
+@binding(0) uniform uniforms: Uniforms;
+@binding(1) uniform tex: sampler2D;
+
+struct VertexOutput {
+  @builtin(position) vec4 position,
+  @location(0) vec4 color,
+  @location(1) vec2 uv,
+}
+
+@vertex
+fn main(@location(0) position: vec2, @location(1) uv: vec2): VertexOutput {
+  ...
+}
+
+@fragment
+fn main(@location(0) color: vec4, @location(1) uv: vec2): vec4 {
+  return color * textureSample(tex, uv);
+}
+```
 
 ## Built-ins
 
-`dot`, `cross`, `normalize`, `length`, `mix`, `clamp`, `min`, `max`, `abs`, `sin`, `cos`, `pow`, `sqrt`, `floor`, `fract`, `texture`, `deg`, `rad`, `rotateLeft`, `rotateRight`, `bitCount`, `extract`, `insert`, `reverse`
+`dot`, `cross`, `normalize`, `length`, `mix`, `clamp`, `min`, `max`, `abs`, `sin`, `cos`, `pow`, `sqrt`, `floor`, `fract`, `texture`, `textureSample`, `deg`, `rad`, `rotateLeft`, `rotateRight`, `bitCount`, `extract`, `insert`, `reverse`
+
+- `texture(tex, uv)` — samples a `sampler2D` (GLSL `texture`, WGSL `textureSample(tex, sampler, uv)` with a synthesized sampler binding).
+- `textureSample(tex, uv)` — identical to `texture`; required name for the GLX text shader path.
+
+## Diagnostics
+
+- Missing `@location`/`@builtin` on a staged entry-point parameter.
+- Duplicate `@location` within one stage.
+- `@builtin(position)` on a non-vertex input.
+- Vertex output struct without a `@builtin(position)` field.
+- `textureSample` with a non-sampler first argument.
+- Sampler used in an arithmetic expression.
+

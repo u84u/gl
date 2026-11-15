@@ -1,0 +1,12 @@
+node_modules/
+tsconfig.tsbuildinfo
+coverage/
+test/
+scripts/
+.freebuff/
+.git/
+.gitignore
+*.md
+*.ts
+tsconfig.json
+package-lock.json

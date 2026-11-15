@@ -61,7 +61,7 @@ function raiseType(t: IRType): Type {
   if (t.kind === "anonymousStruct") {
     return {
       kind: "anonymousStruct",
-      fields: t.fields.map((f) => ({ name: f.name, type: raiseType(f.type) })),
+      fields: t.fields.map((f) => ({ name: f.name, type: raiseType(f.type), span: spanOf(f) })),
     };
   }
   if (t.kind === "union") {
@@ -170,6 +170,14 @@ function raiseExpression(e: IRExpression): Expression {
     return {
       kind: "CompoundAssignExpr",
       operator: e.operator as "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=",
+      target: raiseExpression(e.target),
+      value: raiseExpression(e.value),
+      span: baseSpan,
+    };
+  }
+  if (e.kind === "assignment") {
+    return {
+      kind: "assignment",
       target: raiseExpression(e.target),
       value: raiseExpression(e.value),
       span: baseSpan,
@@ -363,7 +371,7 @@ function raiseStructDecl(s: IRStructDecl): StructDecl {
   return {
     kind: "StructDecl",
     name: s.name,
-    fields: s.fields.map((f) => ({ name: f.name, type: raiseType(f.type) })),
+    fields: s.fields.map((f) => ({ name: f.name, type: raiseType(f.type), location: f.location, builtin: f.builtin, span: spanOf(f) })),
     span: spanOf(s),
   };
 }
@@ -396,7 +404,7 @@ function raiseFnDecl(f: IRFnDecl): FnDecl {
     kind: "FnDecl",
     name: f.name,
     stage: f.stage,
-    params: f.params.map((p) => ({ name: p.name, type: raiseType(p.type) })),
+    params: f.params.map((p) => ({ name: p.name, type: raiseType(p.type), location: p.location, builtin: p.builtin, span: spanOf(p) })),
     returnType: raiseType(f.returnType),
     body: raiseBlock(f.body),
     span: spanOf(f),
@@ -436,7 +444,7 @@ function raiseTrait(t: IRTraitDecl): TraitDecl {
     bounds: t.bounds,
     methods: t.methods.map((m) => ({
       name: m.name,
-      params: m.params.map((p) => ({ name: p.name, type: raiseType(p.type) })),
+      params: m.params.map((p) => ({ name: p.name, type: raiseType(p.type), span: spanOf(p) })),
       returnType: raiseType(m.returnType),
     })),
     span: spanOf(t),

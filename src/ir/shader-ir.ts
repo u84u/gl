@@ -140,6 +140,10 @@ export interface IRTuple {
 export interface IRField {
   name: string;
   type: IRType;
+  /** Optional explicit `@location(N)` attribute on the field. */
+  location?: number;
+  /** Optional explicit `@builtin(...)` attribute on the field. */
+  builtin?: string;
   span?: IRSpan;
 }
 
@@ -163,6 +167,7 @@ export type IRExpression =
   | IRStructLiteral
   | IRArrayLiteral
   | IRCompoundAssign
+  | IRAssignment
   | IRUpdate
   | IRConditional
   | IRNullCoalescing
@@ -241,6 +246,13 @@ export interface IRArrayLiteral {
 export interface IRCompoundAssign {
   kind: "compoundAssign";
   operator: string;
+  target: IRExpression;
+  value: IRExpression;
+  span?: IRSpan;
+}
+
+export interface IRAssignment {
+  kind: "assignment";
   target: IRExpression;
   value: IRExpression;
   span?: IRSpan;

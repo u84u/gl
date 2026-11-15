@@ -106,9 +106,25 @@ export class Parser {
     this.consume("LBrace", "Expect '{' before struct body.");
     const fields: Field[] = [];
     while (!this.check("RBrace") && !this.isAtEnd()) {
+      let location: number | undefined;
+      let builtin: string | undefined;
+      if (this.check("Binding")) {
+        const attr = this.peek();
+        if (attr.lexeme === "location" || attr.lexeme === "builtin") {
+          const attrToken = this.advance();
+          this.consume("LParen", `Expect '(' after '@${attrToken.lexeme}'.`);
+          const arg = this.advance();
+          this.consume("RParen", `Expect ')' after '@${attrToken.lexeme}' argument.`);
+          if (attrToken.lexeme === "location") {
+            location = parseInt(arg.lexeme, 10);
+          } else {
+            builtin = arg.lexeme;
+          }
+        }
+      }
       const fieldType = this.type();
       const fieldName = this.consume("Ident", "Expect field name.");
-      fields.push({ name: fieldName.lexeme, type: fieldType });
+      fields.push({ name: fieldName.lexeme, type: fieldType, location, builtin, span: this.spanOf(fieldName) });
       if (!this.check("RBrace")) {
         this.consume("Comma", "Expect ',' after field.");
       }
@@ -138,13 +154,29 @@ export class Parser {
     const params: Param[] = [];
     if (!this.check("RParen")) {
       do {
+        let location: number | undefined;
+        let builtin: string | undefined;
+        if (this.check("Binding")) {
+          const attr = this.peek();
+          if (attr.lexeme === "location" || attr.lexeme === "builtin") {
+            const attrToken = this.advance();
+            this.consume("LParen", `Expect '(' after '@${attrToken.lexeme}'.`);
+            const arg = this.advance();
+            this.consume("RParen", `Expect ')' after '@${attrToken.lexeme}' argument.`);
+            if (attrToken.lexeme === "location") {
+              location = parseInt(arg.lexeme, 10);
+            } else {
+              builtin = arg.lexeme;
+            }
+          }
+        }
         const paramName = this.consume("Ident", "Expect parameter name.");
         this.consume("Colon", "Expect ':' after parameter name.");
         let paramType = this.type();
         if (paramName.lexeme === "self" && selfType) {
           paramType = selfType;
         }
-        params.push({ name: paramName.lexeme, type: paramType });
+        params.push({ name: paramName.lexeme, type: paramType, location, builtin, span: this.spanOf(paramName) });
       } while (this.match("Comma"));
     }
     this.consume("RParen", "Expect ')' after parameters.");
@@ -272,7 +304,7 @@ export class Parser {
           const paramName = this.consume("Ident", "Expect parameter name.");
           this.consume("Colon", "Expect ':' after parameter name.");
           const paramType = this.type();
-          params.push({ name: paramName.lexeme, type: paramType });
+          params.push({ name: paramName.lexeme, type: paramType, span: this.spanOf(paramName) });
         } while (this.match("Comma"));
       }
       this.consume("RParen", "Expect ')' after parameters.");
@@ -637,12 +669,11 @@ export class Parser {
     if (this.match("Assign")) {
       const equals = this.previous();
       const value = this.assignment();
-      if (expr.kind === "Identifier") {
+      if (expr.kind === "Identifier" || expr.kind === "MemberExpr" || expr.kind === "IndexExpr") {
         return {
-          kind: "BinaryExpr",
-          left: expr,
-          operator: "=",
-          right: value,
+          kind: "assignment",
+          target: expr,
+          value,
           span: expr.span,
         };
       }
@@ -1040,7 +1071,7 @@ export class Parser {
       while (!this.check("RBrace") && !this.isAtEnd()) {
         const fieldType = this.type();
         const fieldName = this.consume("Ident", "Expect field name.");
-        fields.push({ name: fieldName.lexeme, type: fieldType });
+        fields.push({ name: fieldName.lexeme, type: fieldType, span: this.spanOf(fieldName) });
         if (!this.check("RBrace")) {
           this.consume("Comma", "Expect ',' after field.");
         }

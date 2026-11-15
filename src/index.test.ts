@@ -620,4 +620,206 @@ describe("compile API", () => {
       }
     });
   });
+
+  describe("two entry points (GLX built-in shaders)", () => {
+    const shapeSource = `\
+struct Uniforms {
+  vec4 color,
+  vec4 rect,
+  f32 radius,
+}
+
+@binding(0) uniform uniforms: Uniforms;
+
+struct VertexOutput {
+  @builtin(position) vec4 position,
+  @location(0) vec4 color,
+}
+
+@vertex
+fn main(@location(0) position: vec2): VertexOutput {
+  let ndc_x: f32 = uniforms.rect.x * 2.0 - 1.0;
+  let ndc_y: f32 = 1.0 - uniforms.rect.y * 2.0;
+  let ndc_w: f32 = uniforms.rect.z * 2.0;
+  let ndc_h: f32 = uniforms.rect.w * 2.0;
+  let pos: vec2 = position * vec2(ndc_w, ndc_h) + vec2(ndc_x, ndc_y - ndc_h);
+
+  let mut output: VertexOutput;
+  output.position = vec4(pos, 0.0, 1.0);
+  output.color = uniforms.color;
+  return output;
+}
+
+@fragment
+fn main(@location(0) color: vec4): vec4 {
+  return color;
+}`;
+
+    const textSource = `\
+struct Uniforms {
+  vec4 color,
+  vec4 rect,
+  vec4 uv_rect,
+}
+
+@binding(0) uniform uniforms: Uniforms;
+@binding(1) uniform tex: sampler2D;
+
+struct VertexOutput {
+  @builtin(position) vec4 position,
+  @location(0) vec4 color,
+  @location(1) vec2 uv,
+}
+
+@vertex
+fn main(@location(0) position: vec2, @location(1) uv: vec2): VertexOutput {
+  let ndc_x: f32 = uniforms.rect.x * 2.0 - 1.0;
+  let ndc_y: f32 = 1.0 - uniforms.rect.y * 2.0;
+  let ndc_w: f32 = uniforms.rect.z * 2.0;
+  let ndc_h: f32 = uniforms.rect.w * 2.0;
+  let pos: vec2 = position * vec2(ndc_w, ndc_h) + vec2(ndc_x, ndc_y - ndc_h);
+
+  let mut output: VertexOutput;
+  output.position = vec4(pos, 0.0, 1.0);
+  output.color = uniforms.color;
+  output.uv = position * uniforms.uv_rect.zw + uniforms.uv_rect.xy;
+  return output;
+}
+
+@fragment
+fn main(@location(0) color: vec4, @location(1) uv: vec2): vec4 {
+  return color * textureSample(tex, uv);
+}`;
+
+    it("shape.gl emits two artifacts (vertex + fragment) with reflection", () => {
+      for (const target of ["glsl", "glsl-es-300", "wgsl"] as const) {
+        const result = compile({
+          source: shapeSource,
+          target,
+          file: "shape.gl",
+        });
+        expect(result.diagnostics).toEqual([]);
+        expect(result.code).toBeTruthy();
+        expect(result.shaders).toHaveLength(2);
+        const stages = result.shaders.map((s) => s.stage).sort();
+        expect(stages).toEqual(["fragment", "vertex"]);
+        const vertex = result.shaders.find((s) => s.stage === "vertex")!;
+        const fragment = result.shaders.find((s) => s.stage === "fragment")!;
+        expect(vertex.entryPoint).toBe("main");
+        expect(fragment.entryPoint).toBe("main");
+
+        const vInputs = vertex.reflection.entryPoints[0]!.inputs;
+        expect(vInputs.find((i) => i.name === "position")!.location).toBe(0);
+        const fInputs = fragment.reflection.entryPoints[0]!.inputs;
+        expect(fInputs.find((i) => i.name === "color")!.location).toBe(0);
+        const vOutputs = vertex.reflection.entryPoints[0]!.outputs;
+        expect(vOutputs.find((o) => o.builtin === "position")).toBeTruthy();
+        expect(vOutputs.find((o) => o.location === 0)!.name).toBe("color");
+      }
+    });
+
+    it("shape.gl GLSL emits gl_Position for the builtin position", () => {
+      const result = compile({ source: shapeSource, target: "glsl", file: "shape.gl" });
+      expect(result.diagnostics).toEqual([]);
+      expect(result.code).toContain("gl_Position = outVal.position");
+      expect(result.code).toContain("layout(location = 0) out vec4 color;");
+    });
+
+    it("shape.gl WGSL emits @builtin(position) and @location fields", () => {
+      const result = compile({ source: shapeSource, target: "wgsl", file: "shape.wgsl" });
+      expect(result.diagnostics).toEqual([]);
+      expect(result.code).toContain("@builtin(position) position: vec4<f32>");
+      expect(result.code).toContain("@location(0) color: vec4<f32>");
+      expect(result.code).toContain("fn main(@location(0) position: vec2<f32>) -> VertexOutput");
+    });
+
+    it("text.gl emits two artifacts with a synthesized sampler for textureSample", () => {
+      for (const target of ["glsl", "wgsl"] as const) {
+        const result = compile({
+          source: textSource,
+          target,
+          file: "text.gl",
+        });
+        expect(result.diagnostics).toEqual([]);
+        expect(result.code).toBeTruthy();
+        expect(result.shaders).toHaveLength(2);
+        const fragment = result.shaders.find((s) => s.stage === "fragment")!;
+        const fInputs = fragment.reflection.entryPoints[0]!.inputs;
+        expect(fInputs.find((i) => i.name === "uv")!.location).toBe(1);
+        const texRes = fragment.reflection.resources.find((r) => r.name === "tex");
+        expect(texRes).toBeTruthy();
+        if (target === "wgsl") {
+          expect(fragment.code).toContain("textureSample(tex, tex_sampler, uv)");
+          expect(fragment.reflection.resources.find((r) => r.kind === "sampler")).toBeTruthy();
+        } else {
+          expect(fragment.code).toContain("texture(tex, uv)");
+        }
+      }
+    });
+  });
+
+  describe("staged entry-point diagnostics", () => {
+    it("rejects a staged entry-point parameter without @location/@builtin", () => {
+      const result = compile({
+        source: `@vertex fn main(position: vec2): vec4 { return vec4(position, 0.0, 0.0, 1.0) }`,
+        target: "glsl",
+        file: "test.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.some((d) => d.severity === "error")).toBe(true);
+      expect(result.diagnostics.some((d) => d.message.includes("@location"))).toBe(true);
+    });
+
+    it("rejects duplicate locations on staged entry-point parameters", () => {
+      const result = compile({
+        source: `@fragment fn main(@location(0) a: vec4, @location(0) b: vec4): vec4 { return a }`,
+        target: "glsl",
+        file: "test.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.some((d) => d.severity === "error")).toBe(true);
+      expect(result.diagnostics.some((d) => d.message.includes("Duplicate location"))).toBe(true);
+    });
+
+    it("rejects @builtin(position) on a non-vertex input", () => {
+      const result = compile({
+        source: `@fragment fn main(@builtin(position) pos: vec4): vec4 { return pos }`,
+        target: "glsl",
+        file: "test.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.some((d) => d.severity === "error")).toBe(true);
+    });
+
+    it("rejects a vertex output struct without a builtin position field", () => {
+      const result = compile({
+        source: `struct Out { vec4 color, @location(0) vec4 depth }\n@vertex fn main(): Out { return Out(vec4(1.0, 0.0, 0.0, 1.0)) }`,
+        target: "glsl",
+        file: "test.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.some((d) => d.severity === "error")).toBe(true);
+      expect(result.diagnostics.some((d) => d.message.includes("builtin(position)"))).toBe(true);
+    });
+
+    it("rejects textureSample with a non-sampler first argument", () => {
+      const result = compile({
+        source: `@binding(0) uniform u: vec4\nfn main(): vec4 { return textureSample(u, vec2(0.5)) }`,
+        target: "glsl",
+        file: "test.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.length).toBeGreaterThan(0);
+    });
+
+    it("rejects a sampler used in an arithmetic expression", () => {
+      const result = compile({
+        source: `@binding(0) uniform tex: sampler2D\nfn main(): vec4 { return tex + vec4(1.0, 0.0, 0.0, 1.0) }`,
+        target: "glsl",
+        file: "test.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.diagnostics.length).toBeGreaterThan(0);
+    });
+  });
 });

@@ -259,11 +259,19 @@ export function isUnion(t: Type): t is Extract<Type, { kind: "union" }> {
 export interface Field {
   name: string;
   type: Type;
+  /** Optional explicit `@location(N)` or `@builtin(...)` attribute on the field. */
+  location?: number;
+  builtin?: string;
+  span: Span;
 }
 
 export interface Param {
   name: string;
   type: Type;
+  /** Optional explicit `@location(N)` or `@builtin(...)` attribute on the parameter. */
+  location?: number;
+  builtin?: string;
+  span: Span;
 }
 
 export interface StructDecl {
@@ -541,6 +549,13 @@ export interface NullCoalescingExpr {
   span: Span;
 }
 
+export interface AssignmentExpr {
+  kind: "assignment";
+  target: Expression;
+  value: Expression;
+  span: Span;
+}
+
 export interface BlockExpr {
   kind: "BlockExpr";
   block: Block;
@@ -588,6 +603,7 @@ export type Expression =
   | UpdateExpr
   | ConditionalExpr
   | NullCoalescingExpr
+  | AssignmentExpr
   | MatchExpr
   | BlockExpr;
 
@@ -762,6 +778,10 @@ export function isNullCoalescingExpr(e: Expression): e is NullCoalescingExpr {
   return e.kind === "NullCoalescingExpr";
 }
 
+export function isAssignmentExpr(e: Expression): e is AssignmentExpr {
+  return e.kind === "assignment";
+}
+
 export function isMatchExpr(e: Expression): e is MatchExpr {
   return e.kind === "MatchExpr";
 }
@@ -816,6 +836,7 @@ export interface ExpressionVisitor<R> {
   visitUpdateExpr(node: UpdateExpr): R;
   visitConditionalExpr(node: ConditionalExpr): R;
   visitNullCoalescingExpr(node: NullCoalescingExpr): R;
+  visitAssignmentExpr(node: AssignmentExpr): R;
   visitMatchExpr(node: MatchExpr): R;
   visitBlockExpr(node: BlockExpr): R;
 }
@@ -874,6 +895,7 @@ export function visitExpression<R>(node: Expression, visitor: ExpressionVisitor<
     case "UpdateExpr": return visitor.visitUpdateExpr(node);
     case "ConditionalExpr": return visitor.visitConditionalExpr(node);
     case "NullCoalescingExpr": return visitor.visitNullCoalescingExpr(node);
+    case "assignment": return visitor.visitAssignmentExpr(node);
     case "MatchExpr": return visitor.visitMatchExpr(node);
     case "BlockExpr": return visitor.visitBlockExpr(node);
   }

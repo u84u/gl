@@ -1,8 +1,9 @@
 {
   "name": "@u84u/gl",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Compiler for the gl shading language, transpiling to GLSL (450, ES 3.00) and WGSL",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "gl": "dist/cli.js"
   },
@@ -10,10 +11,22 @@
     "dist"
   ],
   "exports": {
-    ".": "./dist/index.js",
-    "./node": "./dist/node/resolver.js",
-    "./browser": "./dist/browser/resolver.js",
-    "./cli": "./dist/cli.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node/resolver.d.ts",
+      "default": "./dist/node/resolver.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/resolver.d.ts",
+      "default": "./dist/browser/resolver.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    }
   },
   "scripts": {
     "build": "tsup",
@@ -23,7 +36,12 @@
     "coverage": "vitest run --coverage",
     "build:validate": "tsx scripts/validate.ts build",
     "validate": "tsx scripts/validate.ts validate",
-    "lsp": "tsx src/lsp/server.ts"
+    "lsp": "tsx src/lsp/server.ts",
+    "prepack": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/u84u/gl.git"
   },
   "keywords": [
     "glsl",
@@ -35,6 +53,12 @@
   "author": "u84u",
   "license": "CC-BY-4.0",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.1.0",

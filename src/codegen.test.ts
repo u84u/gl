@@ -188,12 +188,16 @@ describe("codegen/glsl", () => {
     `)).toThrow("main must return vec4");
   });
 
-  it("throws when main has parameters", () => {
-    expect(() => compileToGLSL(`
-      fn main(x: i32): vec4 {
-        return vec4(1.0, 0.0, 0.0, 1.0)
+  it("emits main with a staged vertex input parameter", () => {
+    const code = compileToGLSL(`
+      @vertex
+      fn main(@location(0) position: vec2): vec4 {
+        return vec4(position, 0.0, 1.0);
       }
-    `)).toThrow("main must take no parameters");
+    `);
+    expect(code).toContain("layout(location = 0) in vec2 position;");
+    expect(code).toContain("void main() {");
+    expect(code).toContain("gl_Position = vec4(position, 0.0, 1.0);");
   });
 
   it("throws when no main function", () => {

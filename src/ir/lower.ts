@@ -14,6 +14,7 @@ import {
   isMemberExpr, isSwizzleExpr, isIndexExpr, isStructLiteral, isArrayLiteral,
   isCompoundAssignExpr, isUpdateExpr, isConditionalExpr, isNullCoalescingExpr,
   isMatchExpr, isBlockExpr,
+  isAssignmentExpr,
   // Pattern guards
   isLiteralPattern, isBindingPattern, isWildcardPattern,
   // AST node types used in type annotations
@@ -173,6 +174,14 @@ function lowerExpression(e: Expression): IRExpression {
     return {
       kind: "compoundAssign",
       operator: e.operator,
+      target: lowerExpression(e.target),
+      value: lowerExpression(e.value),
+      span: spanOf(e),
+    };
+  }
+  if (isAssignmentExpr(e)) {
+    return {
+      kind: "assignment",
       target: lowerExpression(e.target),
       value: lowerExpression(e.value),
       span: spanOf(e),
@@ -349,7 +358,7 @@ function lowerStructDecl(s: StructDecl): IRStructDecl {
   return {
     kind: "struct",
     name: s.name,
-    fields: s.fields.map((f) => ({ name: f.name, type: lowerType(f.type) })),
+    fields: s.fields.map((f) => ({ name: f.name, type: lowerType(f.type), location: f.location, builtin: f.builtin })),
     span: spanOf(s),
   };
 }
@@ -376,7 +385,7 @@ function lowerFnDecl(f: FnDecl): IRFnDecl {
     kind: "fn",
     name: f.name,
     stage: f.stage ?? "fragment",
-    params: f.params.map((p) => ({ name: p.name, type: lowerType(p.type) })),
+    params: f.params.map((p) => ({ name: p.name, type: lowerType(p.type), location: p.location, builtin: p.builtin })),
     returnType: lowerType(f.returnType),
     body: lowerBlock(f.body),
     span: spanOf(f),

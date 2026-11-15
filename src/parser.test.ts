@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { tokenize } from "../src/lexer";
 import { parse } from "../src/parser";
-import { CallExpr, ReturnStmt } from "../src/types";
+import { CallExpr, AssignmentExpr, ReturnStmt } from "../src/types";
 
 function parseSource(source: string) {
   return parse(tokenize(source));
@@ -378,8 +378,10 @@ describe("parser", () => {
     const stmt = fn.body.statements[1]!;
     if (stmt.kind !== "ExpressionStmt") throw new Error("expected ExpressionStmt");
     const expr = stmt.expression;
-    if (expr.kind !== "BinaryExpr") throw new Error("expected BinaryExpr");
-    expect(expr.operator).toBe("=");
+    if (expr.kind !== "assignment") throw new Error("expected AssignmentExpr");
+    const assign = expr as AssignmentExpr;
+    expect(assign.target).toMatchObject({ kind: "Identifier", name: "x" });
+    expect(assign.value).toMatchObject({ kind: "Literal", literalKind: "float", value: 2.0 });
   });
 
   it("parses binding declaration", () => {

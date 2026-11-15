@@ -634,6 +634,26 @@ function typeOf(ctx: TypeCheckContext, expr: Expression): Type {
       }
       return leftType;
     },
+    visitAssignmentExpr: (node) => {
+      const targetType = typeOf(ctx, node.target);
+      const valueType = typeOf(ctx, node.value);
+      if (containsSampler(targetType) || containsSampler(valueType)) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Sampler type cannot be used in an assignment`,
+          severity: "error",
+        });
+      }
+      if (typesDiffer(targetType, valueType)) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: node.span,
+          message: `Assignment type mismatch: cannot assign ${typeName(valueType)} to ${typeName(targetType)}`,
+        });
+      }
+      return targetType;
+    },
     visitMatchExpr: (node) => {
       let resultType: Type | null = null;
       for (const arm of node.arms) {
@@ -769,6 +789,10 @@ function checkBinaryOp(
       if (isScalar(scalar) && scalar.name === v.element) {
         return vec;
       }
+    }
+
+    if (isVector(lt) && isVector(rt) && lt.size === rt.size && lt.element === rt.element) {
+      return lt;
     }
 
     if (isScalar(lt) && isScalar(rt) && lt.name === rt.name) {
@@ -917,6 +941,8 @@ const BUILTIN_SIGNATURES: Record<string, { params: Type[]; result: Type }[]> = {
     { params: [{ kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }], result: { kind: "vector", element: "i32", size: 4 } },
     { params: [{ kind: "vector", element: "i32", size: 3 }, { kind: "scalar", name: "i32" }], result: { kind: "vector", element: "i32", size: 4 } },
     { params: [{ kind: "scalar", name: "i32" }, { kind: "vector", element: "i32", size: 3 }], result: { kind: "vector", element: "i32", size: 4 } },
+    { params: [{ kind: "vector", element: "f32", size: 2 }, { kind: "scalar", name: "f32" }, { kind: "scalar", name: "f32" }], result: { kind: "vector", element: "f32", size: 4 } },
+    { params: [{ kind: "scalar", name: "f32" }, { kind: "vector", element: "f32", size: 2 }, { kind: "scalar", name: "f32" }], result: { kind: "vector", element: "f32", size: 4 } },
   ],
   ivec4: [
     { params: [{ kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }, { kind: "scalar", name: "i32" }], result: { kind: "vector", element: "i32", size: 4 } },
@@ -1044,6 +1070,11 @@ const BUILTIN_SIGNATURES: Record<string, { params: Type[]; result: Type }[]> = {
     { params: [{ kind: "scalar", name: "f32" }], result: { kind: "scalar", name: "f32" } },
   ],
   texture: [
+    { params: [{ kind: "sampler", name: "sampler2D" }, { kind: "vector", element: "f32", size: 2 }], result: { kind: "vector", element: "f32", size: 4 } },
+    { params: [{ kind: "sampler", name: "sampler3D" }, { kind: "vector", element: "f32", size: 3 }], result: { kind: "vector", element: "f32", size: 4 } },
+    { params: [{ kind: "sampler", name: "samplerCube" }, { kind: "vector", element: "f32", size: 3 }], result: { kind: "vector", element: "f32", size: 4 } },
+  ],
+  textureSample: [
     { params: [{ kind: "sampler", name: "sampler2D" }, { kind: "vector", element: "f32", size: 2 }], result: { kind: "vector", element: "f32", size: 4 } },
     { params: [{ kind: "sampler", name: "sampler3D" }, { kind: "vector", element: "f32", size: 3 }], result: { kind: "vector", element: "f32", size: 4 } },
     { params: [{ kind: "sampler", name: "samplerCube" }, { kind: "vector", element: "f32", size: 3 }], result: { kind: "vector", element: "f32", size: 4 } },
@@ -1261,7 +1292,8 @@ export function typeCheck(
       }
     }
     if (isFnDecl(stmt)) {
-      if (functions.has(stmt.name)) {
+      const existing = functions.get(stmt.name);
+      if (existing && existing.stage === stmt.stage) {
         diagnostics.push({
           file: provenance?.get(stmt) ?? file,
           span: stmt.span,
@@ -1377,17 +1409,46 @@ function typeCheckFunction(ctx: TypeCheckContext, fn: FnDecl): void {
   ctx.scope = fnScope;
   ctx.currentFnReturnType = fn.returnType;
 
-  // Stage-specific entry-point signature validation for `main`.
+  // Stage-specific entry-point signature validation for `main`. Only applies
+  // when a stage attribute is explicitly present; a bare `main` keeps the
+  // legacy lenient behavior (defaulting to fragment in codegen).
   if (fn.name === "main" && fn.stage) {
-    if (fn.params.length > 0) {
-      ctx.diagnostics.push({
-        file: ctx.file,
-        span: fn.span,
-        message: `main for stage '${fn.stage}' must take no parameters`,
-        severity: "error",
-      });
+    const stage = fn.stage ?? "fragment";
+
+    // Validate staged entry-point parameters: each requires @location(N) or @builtin(...).
+    const seenLocations = new Set<number>();
+    for (const param of fn.params) {
+      if (param.location === undefined && param.builtin === undefined) {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: param.span ?? fn.span,
+          message: `Entry-point parameter '${param.name}' for stage '${stage}' requires @location(N) or @builtin(...)`,
+          severity: "error",
+        });
+        continue;
+      }
+      if (param.location !== undefined) {
+        if (seenLocations.has(param.location)) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: param.span ?? fn.span,
+            message: `Duplicate location ${param.location} on entry-point parameters for stage '${stage}'`,
+            severity: "error",
+          });
+        }
+        seenLocations.add(param.location);
+      }
+      if (param.builtin !== undefined && stage !== "vertex") {
+        ctx.diagnostics.push({
+          file: ctx.file,
+          span: param.span ?? fn.span,
+          message: `@builtin('${param.builtin}') is only supported on vertex entry-point inputs`,
+          severity: "error",
+        });
+      }
     }
-    if (fn.stage === "fragment") {
+
+    if (stage === "fragment") {
       if (!isVector(fn.returnType) || fn.returnType.size !== 4) {
         if (!(isStructType(fn.returnType))) {
           ctx.diagnostics.push({
@@ -1398,16 +1459,27 @@ function typeCheckFunction(ctx: TypeCheckContext, fn: FnDecl): void {
           });
         }
       }
-    } else if (fn.stage === "vertex") {
-      if (!isVector(fn.returnType) || fn.returnType.size !== 4) {
+    } else if (stage === "vertex") {
+      if (isStructType(fn.returnType)) {
+        const structDecl = ctx.structs.get(fn.returnType.name);
+        const hasPosition = structDecl?.fields?.some((f) => f.builtin === "position") ?? false;
+        if (!hasPosition) {
+          ctx.diagnostics.push({
+            file: ctx.file,
+            span: fn.span,
+            message: `vertex main output struct must include a @builtin(position) field`,
+            severity: "error",
+          });
+        }
+      } else if (!isVector(fn.returnType) || fn.returnType.size !== 4) {
         ctx.diagnostics.push({
           file: ctx.file,
           span: fn.span,
-          message: `vertex main must return vec4 (position), got ${typeName(fn.returnType)}`,
+          message: `vertex main must return vec4 (position) or an output struct, got ${typeName(fn.returnType)}`,
           severity: "error",
         });
       }
-    } else if (fn.stage === "compute") {
+    } else if (stage === "compute") {
       // Compute main does not return a meaningful value to the pipeline.
     }
   }

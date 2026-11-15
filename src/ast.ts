@@ -448,8 +448,8 @@ export function unionType(members: Type[]): Type {
  * @param type - The field Type.
  * @returns The Field node.
  */
-export function field(name: string, type: Type): Field {
-  return { name, type };
+export function field(name: string, type: Type, span: Span = { line: 1, column: 1 }): Field {
+  return { name, type, span };
 }
 
 /**
@@ -457,10 +457,11 @@ export function field(name: string, type: Type): Field {
  *
  * @param name - The parameter name.
  * @param type - The parameter Type.
+ * @param span - Optional source span (defaults to 1:1).
  * @returns The Param node.
  */
-export function param(name: string, type: Type): Param {
-  return { name, type };
+export function param(name: string, type: Type, span: Span = { line: 1, column: 1 }): Param {
+  return { name, type, span };
 }
 
 /* ------------------------------------------------------------------ */

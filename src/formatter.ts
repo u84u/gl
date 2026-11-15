@@ -23,6 +23,7 @@ import {
   isStructLiteral,
   isArrayLiteral,
   isCompoundAssignExpr,
+  isAssignmentExpr,
   isUpdateExpr,
   isConditionalExpr,
   isNullCoalescingExpr,
@@ -220,6 +221,9 @@ function formatExpression(expr: Expression): string {
       .map((s) => formatStatement(s, 0).trim())
       .join(" ");
     return `{ ${stmts} }`;
+  }
+  if (isAssignmentExpr(expr)) {
+    return `${formatExpression(expr.target)} = ${formatExpression(expr.value)}`;
   }
   throw new Error("Cannot format expression");
 }
