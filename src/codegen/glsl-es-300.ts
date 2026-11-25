@@ -38,7 +38,37 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
         severity: "error",
       }];
     }
-    return validateGLSLModuleIR(module, file, this.capabilities);
+    const diagnostics = validateGLSLModuleIR(module, file, this.capabilities);
+    for (const item of module.items) {
+      if (item.kind !== "fn" || item.name !== "main" || (item.stage ?? "fragment") !== "fragment" || item.returnType.kind !== "struct") {
+        continue;
+      }
+      const returnTypeName = item.returnType.name;
+      const outputStruct = module.items.find((candidate): candidate is IRStructDecl =>
+        candidate.kind === "struct" && candidate.name === returnTypeName,
+      );
+      const outputs = (outputStruct?.fields ?? [])
+        .map((field, index) => ({ field, location: field.location ?? index }))
+        .filter(({ field }) => field.builtin === undefined);
+      if (outputs.length > 1) {
+        diagnostics.push({
+          file,
+          span: item.span ?? { line: 1, column: 1 },
+          message: "GLSL ES 3.00 supports only one fragment output",
+          code: "GLSL_ES_300_MULTIPLE_FRAGMENT_OUTPUTS",
+          severity: "error",
+        });
+      } else if (outputs.some(({ location }) => location !== 0)) {
+        diagnostics.push({
+          file,
+          span: item.span ?? { line: 1, column: 1 },
+          message: "GLSL ES 3.00 requires the fragment output at location 0",
+          code: "GLSL_ES_300_UNSUPPORTED_FRAGMENT_OUTPUT_LOCATION",
+          severity: "error",
+        });
+      }
+    }
+    return diagnostics;
   }
 
   generate(
@@ -63,9 +93,35 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
     let shaders: ShaderArtifact[] = [];
 
     try {
-      const emitted = generateGLSLShaders(module, "glsl-es-300");
+      const declarations = generateGLSLShaders(module, "glsl-es-300");
+      let usedNames = declarations.map((shader) => shader.code).join("\n");
+      const outputIdentifier = uniqueIdentifier("_gl_output", usedNames);
+      usedNames += ` ${outputIdentifier}`;
+      const varyingLocations = new Set<number>();
+      for (const { stage, mainFn } of declarations) {
+        if (stage === "vertex" && mainFn.returnType.kind === "struct") {
+          const returnTypeName = mainFn.returnType.name;
+          const outputStruct = module.items.find((item): item is IRStructDecl =>
+            item.kind === "struct" && item.name === returnTypeName,
+          );
+          outputStruct?.fields.forEach((field, index) => {
+            if (field.builtin === undefined) varyingLocations.add(field.location ?? index);
+          });
+        } else if (stage === "fragment") {
+          mainFn.params.forEach((param) => {
+            if (param.location !== undefined) varyingLocations.add(param.location);
+          });
+        }
+      }
+      const varyingNames = new Map<number, string>();
+      for (const location of [...varyingLocations].sort((left, right) => left - right)) {
+        const name = uniqueIdentifier(varyingName(location), usedNames);
+        varyingNames.set(location, name);
+        usedNames += ` ${name}`;
+      }
+      const emitted = generateGLSLShaders(module, "glsl-es-300", { varyingNames });
       shaders = emitted.map(({ stage, code, mainFn }) => {
-        const esCode = emitGlslEsCode(code);
+        const esCode = code.replace(/\boutput\b/g, outputIdentifier);
         const structs = glslStructMap(module);
         const resources: ShaderResourceReflection[] = [];
         const uniforms: ShaderUniformReflection[] = [];
@@ -123,12 +179,18 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
                 (s): s is IRStructDecl => s.kind === "struct" && s.name === rt.name,
               );
               if (structDecl) {
-                for (const field of structDecl.fields) {
+                for (let index = 0; index < structDecl.fields.length; index++) {
+                  const field = structDecl.fields[index];
                   if (!field) continue;
                   if (field.builtin === "position") {
                     outputs.push({ name: "gl_Position", type: glslType(field.type), builtin: "position" });
-                  } else if (field.location !== undefined) {
-                    outputs.push({ name: field.name, type: glslType(field.type), location: field.location });
+                  } else {
+                    const location = field.location ?? index;
+                    outputs.push({
+                      name: varyingNames.get(location) ?? field.name,
+                      type: glslType(field.type),
+                      location,
+                    });
                   }
                 }
               }
@@ -140,9 +202,30 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
           entryPoint: "main",
           code: esCode,
           reflection: {
-            entryPoints: [{ name: "main", stage, inputs, outputs }],
-            resources,
-            uniforms,
+            entryPoints: [{
+              name: "main",
+              stage,
+              inputs: inputs.map((input) => ({
+                ...input,
+                name: stage === "fragment" && input.location !== undefined
+                  ? varyingNames.get(input.location) ?? input.name
+                  : mangleEsIdentifier(input.name, outputIdentifier),
+              })),
+              outputs: outputs.map((output) => ({
+                ...output,
+                name: stage === "vertex" && output.location !== undefined
+                  ? varyingNames.get(output.location) ?? output.name
+                  : mangleEsIdentifier(output.name, outputIdentifier),
+              })),
+            }],
+            resources: resources.map((resource) => ({
+              ...resource,
+              name: mangleEsIdentifier(resource.name, outputIdentifier),
+            })),
+            uniforms: uniforms.map((uniform) => ({
+              ...uniform,
+              name: mangleEsIdentifier(uniform.name, outputIdentifier),
+            })),
           },
         };
       });
@@ -163,22 +246,25 @@ export class GlslEs300Backend implements ShaderCodegenBackend {
   }
 }
 
-/**
- * Applies GLSL ES 3.00 post-processing to a single shader: inserts the
- * `precision mediump float;` qualifier after the version header, ensures the
- * version is on the first line, and drops GLSL 4.50 uniform binding layout
- * qualifiers (ES 3.00 uses separate sampler/texture uniforms instead).
- */
-function emitGlslEsCode(code: string): string {
-  const lines = code.split("\n");
-  const versionIdx = lines.findIndex((l) => l.startsWith("#version 300 es"));
-  if (versionIdx !== -1) {
-    lines.splice(versionIdx + 1, 0, "precision mediump float;");
-    lines.splice(versionIdx + 2, 0, "");
-    const preceding = lines.splice(0, versionIdx);
-    lines.splice(2, 0, ...preceding);
+function varyingName(location: number): string {
+  return `_gl_varying_${location}`;
+}
+
+function mangleEsIdentifier(name: string, outputIdentifier: string): string {
+  return name === "output" ? outputIdentifier : name;
+}
+
+function uniqueIdentifier(base: string, existingCode: string): string {
+  let candidate = base;
+  let suffix = 0;
+  while (new RegExp(`\\b${escapeRegExp(candidate)}\\b`).test(existingCode)) {
+    candidate = `${base}_${++suffix}`;
   }
-  return lines.join("\n").replace(/^layout\(binding = \d+\) uniform /gm, "uniform ");
+  return candidate;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export const glslEs300Backend = new GlslEs300Backend();

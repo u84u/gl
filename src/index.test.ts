@@ -726,6 +726,18 @@ fn main(@location(0) color: vec4, @location(1) uv: vec2): vec4 {
   return color * textureSample(tex, uv);
 }`;
 
+    it("rejects multiple fragment outputs on GLSL ES 3.00", () => {
+      const result = compile({
+        source: `struct FragOutput { f32 first, f32 second }\nfn main(): FragOutput {\n  return { .first = 0.0, .second = 1.0 }\n}`,
+        target: "glsl-es-300",
+        file: "multiple-outputs.gl",
+      });
+      expect(result.code).toBeNull();
+      expect(result.shaders).toHaveLength(0);
+      expect(result.diagnostics.map((diagnostic) => diagnostic.code))
+        .toContain("GLSL_ES_300_MULTIPLE_FRAGMENT_OUTPUTS");
+    });
+
     it("shape.gl emits two artifacts (vertex + fragment) with reflection", () => {
       for (const target of ["glsl", "glsl-es-300", "wgsl"] as const) {
         const result = compile({
@@ -746,10 +758,11 @@ fn main(@location(0) color: vec4, @location(1) uv: vec2): vec4 {
         const vInputs = vertex.reflection.entryPoints[0]!.inputs;
         expect(vInputs.find((i) => i.name === "position")!.location).toBe(0);
         const fInputs = fragment.reflection.entryPoints[0]!.inputs;
-        expect(fInputs.find((i) => i.name === "color")!.location).toBe(0);
+        const expectedVaryingName = target === "glsl-es-300" ? "_gl_varying_0" : "color";
+        expect(fInputs.find((i) => i.name === expectedVaryingName)!.location).toBe(0);
         const vOutputs = vertex.reflection.entryPoints[0]!.outputs;
         expect(vOutputs.find((o) => o.builtin === "position")).toBeTruthy();
-        expect(vOutputs.find((o) => o.location === 0)!.name).toBe("color");
+        expect(vOutputs.find((o) => o.location === 0)!.name).toBe(expectedVaryingName);
       }
     });
 

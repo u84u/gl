@@ -69,6 +69,45 @@
 
         var scratchCanvas = null;
 
+        function validateShader(sourceText, stage) {
+          var gl = document.createElement("canvas").getContext("webgl2");
+          if (!gl) return { ok: false, stage: "context", error: "WebGL2 is not available" };
+          var shader = compileShader(gl, stage === "vertex" ? gl.VERTEX_SHADER : gl.FRAGMENT_SHADER, sourceText, stage);
+          if (!shader.ok) return { ok: false, stage: stage, error: shader.error };
+          gl.deleteShader(shader.shader);
+          return { ok: true, stage: stage };
+        }
+
+        function validateProgram(vertexSource, fragmentSource) {
+          var canvas = document.createElement("canvas");
+          var gl = canvas.getContext("webgl2");
+          if (!gl) {
+            return { ok: false, stage: "context", error: "WebGL2 is not available" };
+          }
+          var vs = compileShader(gl, gl.VERTEX_SHADER, vertexSource, "vertex");
+          if (!vs.ok) return { ok: false, stage: "vertex", error: vs.error };
+          var fs = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource, "fragment");
+          if (!fs.ok) {
+            gl.deleteShader(vs.shader);
+            return { ok: false, stage: "fragment", error: fs.error };
+          }
+          var program = gl.createProgram();
+          if (!program) {
+            gl.deleteShader(vs.shader);
+            gl.deleteShader(fs.shader);
+            return { ok: false, stage: "link", error: "Unable to create program" };
+          }
+          gl.attachShader(program, vs.shader);
+          gl.attachShader(program, fs.shader);
+          gl.linkProgram(program);
+          gl.deleteShader(vs.shader);
+          gl.deleteShader(fs.shader);
+          var ok = gl.getProgramParameter(program, gl.LINK_STATUS);
+          var error = ok ? undefined : gl.getProgramInfoLog(program) || "Program failed to link";
+          gl.deleteProgram(program);
+          return { ok: ok, stage: "link", error: error };
+        }
+
         function renderShader(fragmentSource, options) {
           var opts = options || {};
           var width = Math.max(1, Math.floor(opts.width || 8));
@@ -148,6 +187,8 @@
         }
 
         window.renderShader = renderShader;
+        window.validateShader = validateShader;
+        window.validateProgram = validateProgram;
 
         var source = document.getElementById("source");
         var output = document.getElementById("output");

@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import { dirname, join } from "path";
-import { fileURLToPath, pathToFileURL } from "url";
-import { compile } from "../src/index";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { compile, compileAsync } from "../src/index";
+import { NodeFileSourceResolver } from "../src/node/resolver";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PAGE_URL = pathToFileURL(join(__dirname, "webgl", "index.html")).href;
@@ -29,6 +31,26 @@ async function openPage(target: Browser): Promise<Page> {
 
 async function hasWebGL2(target: Page): Promise<boolean> {
   return target.evaluate(() => document.createElement("canvas").getContext("webgl2") !== null);
+}
+
+async function validateProgram(vertex: string, fragment: string): Promise<RenderResult> {
+  if (!page) throw new Error("Playwright page is not initialized");
+  return page.evaluate(({ vertexSource, fragmentSource }) => {
+    const validator = (window as unknown as {
+      validateProgram: (vertex: string, fragment: string) => RenderResult;
+    }).validateProgram;
+    return validator(vertexSource, fragmentSource);
+  }, { vertexSource: vertex, fragmentSource: fragment });
+}
+
+async function validateShader(source: string, stage: "vertex" | "fragment"): Promise<RenderResult> {
+  if (!page) throw new Error("Playwright page is not initialized");
+  return page.evaluate(({ shaderSource, shaderStage }) => {
+    const validator = (window as unknown as {
+      validateShader: (shader: string, stage: "vertex" | "fragment") => RenderResult;
+    }).validateShader;
+    return validator(shaderSource, shaderStage);
+  }, { shaderSource: source, shaderStage: stage });
 }
 
 async function launchRenderer(): Promise<{ browser: Browser; page: Page }> {
@@ -121,6 +143,95 @@ function expectPixel(
 }
 
 describe("headless WebGL2 render validation (Playwright + Chromium)", () => {
+  it("compiles GLSL ES 3.00 fixture shaders and links compatible stage pairs", async () => {
+    const fixturesDir = join(__dirname, "fixtures", "gl");
+    const sources = readdirSync(fixturesDir).filter((name) => name.endsWith(".gl")).sort();
+    let validatedShaders = 0;
+    let linkedPrograms = 0;
+    let rejectedMultipleOutputs = 0;
+
+    for (const sourceName of sources) {
+      const sourcePath = join(fixturesDir, sourceName);
+      const source = readFileSync(sourcePath, "utf8");
+      if (!/\bfn\s+main\b/.test(source)) continue;
+      const options = {
+        source,
+        target: "glsl-es-300",
+        file: sourcePath,
+        sourceId: sourcePath,
+        resolver: new NodeFileSourceResolver(fixturesDir),
+      };
+      const result = source.includes("import")
+        ? await compileAsync(options)
+        : compile(options);
+      if (sourceName === "glsl_struct_return_locations.gl" || sourceName === "multi_output.gl") {
+        expect(result.code, sourceName).toBeNull();
+        expect(result.shaders, sourceName).toHaveLength(0);
+        expect(result.diagnostics.map((diagnostic) => diagnostic.code), sourceName)
+          .toContain("GLSL_ES_300_MULTIPLE_FRAGMENT_OUTPUTS");
+        rejectedMultipleOutputs++;
+        continue;
+      }
+      expect(result.diagnostics, sourceName).toEqual([]);
+      expect(result.shaders.length, sourceName).toBeGreaterThan(0);
+      for (const shader of result.shaders) {
+        const compiled = await validateShader(shader.code, shader.stage);
+        expect(compiled.ok, `${sourceName} (${shader.stage}): ${compiled.error ?? ""}`).toBe(true);
+        validatedShaders++;
+      }
+      const vertex = result.shaders.find((shader) => shader.stage === "vertex");
+      const fragment = result.shaders.find((shader) => shader.stage === "fragment");
+      if (vertex && fragment) {
+        const linked = await validateProgram(vertex.code, fragment.code);
+        expect(linked.ok, `${sourceName} link: ${linked.error ?? ""}`).toBe(true);
+        linkedPrograms++;
+      }
+    }
+
+    expect(validatedShaders).toBeGreaterThan(40);
+    expect(linkedPrograms).toBeGreaterThan(0);
+    expect(rejectedMultipleOutputs).toBe(2);
+  }, 120_000);
+
+  it("links GLSL ES 3.00 stages using implicit vertex output locations", async () => {
+    const result = compile({
+      source: `struct VertexOutput {\n  @builtin(position) vec4 position,\n  vec2 uv,\n}\n@vertex\nfn main(@location(0) position: vec2): VertexOutput {\n  let mut output: VertexOutput;\n  output.position = vec4(position, 0.0, 1.0);\n  output.uv = position;\n  return output;\n}\n@fragment\nfn main(@location(1) uv: vec2): vec4 {\n  return vec4(uv, 0.0, 1.0);\n}`,
+      target: "glsl-es-300",
+      file: "implicit-interface-location.gl",
+    });
+    expect(result.diagnostics).toEqual([]);
+    const vertex = result.shaders.find((shader) => shader.stage === "vertex")!;
+    const fragment = result.shaders.find((shader) => shader.stage === "fragment")!;
+    expect(vertex.code).toContain("out vec2 _gl_varying_1;");
+    expect(fragment.code).toContain("in vec2 _gl_varying_1;");
+    expect(vertex.reflection.entryPoints[0]!.outputs.find((output) => output.location === 1)!.name)
+      .toBe("_gl_varying_1");
+    expect(fragment.reflection.entryPoints[0]!.inputs.find((input) => input.location === 1)!.name)
+      .toBe("_gl_varying_1");
+    const linked = await validateProgram(vertex.code, fragment.code);
+    expect(linked.ok, linked.error).toBe(true);
+  });
+
+  it("keeps generated ES 3.00 interface names collision-free", async () => {
+    const result = compile({
+      source: `struct VertexOutput {\n  @builtin(position) vec4 position,\n  @location(0) vec2 _gl_varying_0,\n}\n@vertex\nfn main(@location(0) _gl_output: vec2): VertexOutput {\n  let mut output: VertexOutput;\n  output.position = vec4(_gl_output, 0.0, 1.0);\n  output._gl_varying_0 = _gl_output;\n  return output;\n}\n@fragment\nfn main(@location(0) _gl_varying_0: vec2): vec4 {\n  return vec4(_gl_varying_0, 0.0, 1.0);\n}`,
+      target: "glsl-es-300",
+      file: "interface-collisions.gl",
+    });
+    expect(result.diagnostics).toEqual([]);
+    const vertex = result.shaders.find((shader) => shader.stage === "vertex")!;
+    const fragment = result.shaders.find((shader) => shader.stage === "fragment")!;
+    expect(vertex.code).toContain("out vec2 _gl_varying_0_1;");
+    expect(vertex.code).toContain("VertexOutput _gl_output_1;");
+    expect(fragment.code).toContain("vec2 _gl_varying_0 = _gl_varying_0_1;");
+    expect(vertex.reflection.entryPoints[0]!.outputs.find((output) => output.location === 0)!.name)
+      .toBe("_gl_varying_0_1");
+    expect(fragment.reflection.entryPoints[0]!.inputs.find((input) => input.location === 0)!.name)
+      .toBe("_gl_varying_0_1");
+    const linked = await validateProgram(vertex.code, fragment.code);
+    expect(linked.ok, linked.error).toBe(true);
+  });
+
   it("renders solid color shader", async () => {
     const result = await renderGlsl(`
       fn main(): vec4 {
