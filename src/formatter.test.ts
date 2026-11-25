@@ -192,6 +192,12 @@ describe("formatter", () => {
     expect(result).toContain("deg(1.0)");
   });
 
+  it("preserves range-for variable names", () => {
+    const result = format("fn main(): vec4 { for index in 0..3 { let value: i32 = index } return vec4(1.0, 0.0, 0.0, 1.0) }");
+    expect(result).toContain("for index in 0..3 {");
+    expect(result).not.toContain("__loop_var");
+  });
+
   it("formats mutable variable", () => {
     const source = "fn main(): vec4 { let mut x: f32 = 1.0 return vec4(x, 0.0, 0.0, 1.0) }";
     const result = format(source);

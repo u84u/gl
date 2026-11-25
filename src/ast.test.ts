@@ -155,10 +155,7 @@ describe("AST builder API", () => {
     expect(glsl).toContain("for");
 
     const wgsl = compileAst(program, "wgsl");
-    expect(wgsl).toContain("var x = 0;");
-    expect(wgsl).toContain("loop {");
-    expect(wgsl).toContain("if (!(x < 3)) {");
-    expect(wgsl).toContain("x = x + 1;");
+    expect(wgsl).toContain("for (var x = 0; x < 3; x = x + 1) {");
   });
 
   it("compiles inclusive range-based for loops", () => {
@@ -173,7 +170,7 @@ describe("AST builder API", () => {
     ]);
 
     const wgsl = compileAst(program, "wgsl");
-    expect(wgsl).toContain("if (!(x <= 3)) {");
+    expect(wgsl).toContain("for (var x = 0; x <= 3; x = x + 1) {");
   });
 
   it("compiles binding uniforms", () => {
@@ -269,10 +266,14 @@ describe("AST builder API", () => {
     expect(wgsl).toContain("discard;");
   });
 
-  it("compiles loop break and continue", () => {
+  it("compiles loop break and continue in reachable branches", () => {
     const program = ast.program([
       ast.mainVec4([
-        ast.loopStmt(ast.block([ast.breakStmt(), ast.continueStmt()])),
+        ast.varDecl("i", ast.i32(), ast.int(1)),
+        ast.loopStmt(ast.block([
+          ast.ifStmt(ast.binary(ast.ident("i"), ">", ast.int(0)), ast.block([ast.continueStmt()])),
+          ast.breakStmt(),
+        ])),
         ast.returnStmt(ast.call(ast.ident("vec4"), [ast.float(1.0), ast.float(0.0), ast.float(0.0), ast.float(1.0)])),
       ]),
     ]);
@@ -297,8 +298,7 @@ describe("AST builder API", () => {
 
     const wgsl = compileAst(program, "wgsl");
     expect(wgsl).toContain("loop {");
-    expect(wgsl).toContain("if (!((i < 3))) {");
-    expect(wgsl).toContain("break;");
+    expect(wgsl).toContain("break if !((i < 3));");
   });
 
   it("compiles struct returns with locations", () => {

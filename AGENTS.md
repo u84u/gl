@@ -4,16 +4,21 @@ Compiler for `gl`, a statically-typed shading language that transpiles to GLSL (
 
 ## Commands
 
+Development and CI require **Node.js 22.12.0 or newer**. CI tests Node 22.12 and Node 24 on Linux, Windows, and macOS. The WGSL fixtures are independently validated by Naga via `naga-wasi-cli` during `npm test`.
+
 | Command | Purpose |
 |---------|---------|
 | `npm run typecheck` | `tsc --noEmit` — strict, run before every change |
-| `npm test` | `vitest run` — full test suite |
+| `npm test` | `vitest run` — full test suite, including Playwright WebGL2 render checks |
+| `npm run test:render` | Only the Playwright WebGL2 render checks |
+| `npm run test:package` | Packs and installs the tarball into a clean consumer, then checks exports and CLI |
+| `npm run install:browsers` | Downloads Playwright Chromium for render tests |
 | `npm run coverage` | `vitest run --coverage` |
 | `npm run build` | `tsup` bundle to `dist/` (ESM only, clean output) |
-| `npm run build:validate` | Compiles C validator (needs system `libOSMesa`, `libGL`) |
-| `npm run validate` | Runs `build:validate` |
 | `npm run dev` | `tsup --watch` |
 | `npm run lsp` | `tsx src/lsp/server.ts` |
+
+Render tests use Playwright Chromium with WebGL2 (SwiftShader fallback) and need `npm run install:browsers` once per machine.
 
 No separate lint step. `tsconfig.json` is strict (`noUncheckedIndexedAccess`, `noUnusedLocals`, `noUnusedParameters`, `noPropertyAccessFromIndexSignature`, etc.).
 
@@ -132,7 +137,7 @@ Backend capability enforcement validates:
 6. `src/codegen/glsl.ts` / `src/codegen/glsl-es-300.ts` / `src/codegen/wgsl.ts`: `emitStatement()` and/or `emitExpression()` + target validation (validate against `IRModule`)
 7. `formatter.ts`: `formatStatement()` and/or `formatExpression()`
 8. `*.test.ts`: add tests
-9. Run `npm run typecheck`, `npm test`, `npm run build`, `npm run validate`
+9. Run `npm run typecheck`, `npm test`, `npm run build`
 
 Adding a new `Statement`/`Expression` kind requires updating the `StatementVisitor`/`ExpressionVisitor` interfaces and `visitStatement`/`visitExpression` dispatchers in `types.ts`.
 

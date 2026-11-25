@@ -1621,14 +1621,17 @@ function typeCheckStatement(ctx: TypeCheckContext, stmt: Statement): void {
       if (node.range) {
         const startType = typeOf(ctx, node.range.start);
         typeOf(ctx, node.range.end);
-        if (node.body.statements.length > 0) {
-          const blockScope = makeScope(ctx.scope);
-          blockScope.symbols.set("", { name: "", type: startType, kind: "variable", span: node.span });
-          const prevScope = ctx.scope;
-          ctx.scope = blockScope;
-          typeCheckBlock(ctx, node.body);
-          ctx.scope = prevScope;
-        }
+        const loopScope = makeScope(ctx.scope);
+        loopScope.symbols.set(node.range.variable, {
+          name: node.range.variable,
+          type: startType,
+          kind: "variable",
+          span: node.span,
+        });
+        const prevScope = ctx.scope;
+        ctx.scope = loopScope;
+        typeCheckBlock(ctx, node.body);
+        ctx.scope = prevScope;
       } else {
         if (node.init) {
           if (isVarDecl(node.init)) {

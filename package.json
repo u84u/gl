@@ -33,11 +33,12 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:render": "vitest run test/render.test.ts",
+    "install:browsers": "playwright install chromium",
     "coverage": "vitest run --coverage",
-    "build:validate": "tsx scripts/validate.ts build",
-    "validate": "tsx scripts/validate.ts validate",
     "lsp": "tsx src/lsp/server.ts",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:package": "node scripts/package-smoke.mjs"
   },
   "repository": {
     "type": "git",
@@ -57,12 +58,14 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.12.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.1.0",
     "commander": "^13.0.0",
+    "naga-wasi-cli": "^0.1.0",
+    "playwright": "^1.65.1",
     "tsup": "^8.4.0",
     "tsx": "^4.23.15",
     "typescript": "^5.8.0",

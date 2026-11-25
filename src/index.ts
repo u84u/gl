@@ -1,5 +1,5 @@
 import { tokenize } from "./lexer";
-import { parse } from "./parser";
+import { parse, ParseError } from "./parser";
 import { typeCheck, Diagnostic } from "./typechecker";
 export type { Diagnostic } from "./typechecker";
 import { generateGLSL } from "./codegen/glsl";
@@ -102,6 +102,17 @@ export interface CompileResult {
 
 function formatError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function parseDiagnostic(file: string, err: unknown): Diagnostic | null {
+  if (!(err instanceof ParseError)) return null;
+  return {
+    file,
+    code: "PARSE_ERROR",
+    severity: "error",
+    span: { line: err.token.line, column: err.token.column },
+    message: err.message,
+  };
 }
 
 /**
@@ -233,7 +244,21 @@ export function compileSync(
     } as CompileResult;
   }
 
-  const { statements, hasImports } = collectSingleFile(source);
+  let collected: ReturnType<typeof collectSingleFile>;
+  try {
+    collected = collectSingleFile(source);
+  } catch (err) {
+    const parseError = parseDiagnostic(file, err);
+    if (!parseError) throw err;
+    return {
+      code: null,
+      shaders: [],
+      ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
+      diagnostics: [parseError],
+      target,
+    };
+  }
+  const { statements, hasImports } = collected;
   if (hasImports) {
     return {
       code: null,
@@ -310,7 +335,7 @@ export async function compileAsync(
       shaders: [],
       ast: { kind: "Program", statements: [], span: { line: 1, column: 1 } },
       diagnostics: [
-        {
+        parseDiagnostic(file, err) ?? {
           file,
           span: { line: 1, column: 1 },
           message: formatError(err),

@@ -8,7 +8,9 @@ fn main() -> @location(0) vec4<f32> {
       break;
     }
     _ = i;
-    i = i + 1;
+    continuing {
+      i = i + 1;
+    }
   }
   return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }

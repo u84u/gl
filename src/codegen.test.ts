@@ -896,18 +896,19 @@ describe("codegen/glsl", () => {
     expect(code).not.toContain("<=>");
   });
 
-  it("emits a range-for index that is valid in GLSL ES", () => {
+  it("emits range-for variables consistently in GLSL", () => {
     const code = compileToGLSL(`
       fn main(): vec4 {
-        let mut i: i32 = 0
+        let mut total: i32 = 0
         for x in 0..3 {
-          i += 1
+          total += x
         }
         return vec4(1.0, 0.0, 0.0, 1.0)
       }
     `);
-    expect(code).toContain("for (int loopIndex = 0; loopIndex < 3; loopIndex++) {");
-    expect(code).not.toContain("__loop_var");
+    expect(code).toContain("for (int x = 0; x < 3; x++) {");
+    expect(code).toContain("(total = total + x);");
+    expect(code).not.toContain("loopIndex");
   });
 
   it("emits match as statement if-else chain", () => {
@@ -1215,12 +1216,13 @@ describe("codegen/wgsl", () => {
     expect(code).not.toContain("(i = i + 1)");
   });
 
-  it("emits loop, break and continue", () => {
+  it("emits loop, break and continue in reachable branches", () => {
     const code = compileToWGSL(`
       fn main(): vec4 {
+        let mut i: i32 = 0
         loop {
+          if (i > 0) { continue }
           break
-          continue
         }
         return vec4(1.0, 0.0, 0.0, 1.0)
       }
@@ -1378,20 +1380,18 @@ describe("codegen/wgsl", () => {
     expect(code).toContain("result = 0.0;");
   });
 
-  it("emits range-based for loop", () => {
+  it("emits range-based for loop with a usable loop variable", () => {
     const code = compileToWGSL(`
       fn main(): vec4 {
         let mut i: i32 = 0
         for x in 0..3 {
-          i += 1
+          i += x
         }
         return vec4(1.0, 0.0, 0.0, 1.0)
       }
     `);
-    expect(code).toContain("var x = 0;");
-    expect(code).toContain("loop {");
-    expect(code).toContain("if (!(x < 3)) {");
-    expect(code).toContain("x = x + 1;");
+    expect(code).toContain("for (var x = 0; x < 3; x = x + 1) {");
+    expect(code).toContain("i = i + x;");
   });
 
   it("emits inclusive range-based for loop", () => {
@@ -1404,7 +1404,7 @@ describe("codegen/wgsl", () => {
         return vec4(1.0, 0.0, 0.0, 1.0)
       }
     `);
-    expect(code).toContain("if (!(x <= 2)) {");
+    expect(code).toContain("for (var x = 0; x <= 2; x = x + 1) {");
   });
 
   it("emits compound assignment as a statement", () => {

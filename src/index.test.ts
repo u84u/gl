@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile, compileAsync } from "../src/index";
+import { compile, compileAsync, compileSync } from "../src/index";
 import { NodeFileSourceResolver } from "../src/node/resolver";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "fs";
 import { MemorySourceResolver } from "../src/modules/resolver";
@@ -7,6 +7,41 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 describe("compile API", () => {
+  it("returns structured diagnostics for parse errors in both compile entry points", async () => {
+    const source = "fn main(): vec4 { return vec4( }";
+    const syncResult = compileSync({ source, target: "glsl", file: "syntax.gl" });
+    const asyncResult = await compileAsync({
+      source,
+      target: "glsl",
+      file: "syntax.gl",
+      resolver: new MemorySourceResolver(),
+    });
+
+    expect(syncResult.code).toBeNull();
+    expect(asyncResult.code).toBeNull();
+    expect(syncResult.diagnostics[0]).toMatchObject({
+      file: "syntax.gl",
+      code: "PARSE_ERROR",
+      severity: "error",
+      message: expect.stringContaining("Expect expression"),
+    });
+    expect(asyncResult.diagnostics[0]).toMatchObject(syncResult.diagnostics[0]!);
+    expect(syncResult.diagnostics[0]!.span.line).toBeGreaterThan(0);
+    expect(syncResult.diagnostics[0]!.span.column).toBeGreaterThan(0);
+  });
+
+  it("keeps range-for variables scoped to the loop", () => {
+    const result = compileSync({
+      source: `fn main(): vec4 {
+        for x in 0..3 { let y: i32 = x }
+        return vec4(f32(x), 0.0, 0.0, 1.0)
+      }`,
+      target: "glsl",
+      file: "range.gl",
+    });
+    expect(result.diagnostics.some((d) => d.message.includes("Undeclared identifier 'x'"))).toBe(true);
+  });
+
   it("compiles valid shader to GLSL", () => {
     const result = compile({
       source: `fn main(): vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }`,

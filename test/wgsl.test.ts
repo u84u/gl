@@ -7,6 +7,10 @@ import { compile } from "../src/index";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, "fixtures", "wgsl");
 
+function readText(file: string): string {
+  return readFileSync(file, "utf-8").replace(/\r\n/g, "\n");
+}
+
 function getFixtureNames(): string[] {
   return readdirSync(fixturesDir)
     .filter((f) => f.endsWith(".gl"))
@@ -29,8 +33,8 @@ describe("golden-file WGSL output", () => {
   });
   for (const name of names) {
     it(`matches golden output for ${name}`, () => {
-      const source = readFileSync(join(fixturesDir, `${name}.gl`), "utf-8");
-      const expected = readFileSync(join(fixturesDir, `${name}.wgsl`), "utf-8");
+      const source = readText(join(fixturesDir, `${name}.gl`));
+      const expected = readText(join(fixturesDir, `${name}.wgsl`));
 
       const result = compile({ source, target: "wgsl", file: join(fixturesDir, `${name}.gl`) });
 

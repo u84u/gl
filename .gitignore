@@ -3,5 +3,5 @@ dist/
 tsconfig.tsbuildinfo
 bad*.gl
 coverage/
-test/cvalidate/build/
+.wgsl-validation-*/
 *.glsl

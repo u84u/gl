@@ -452,9 +452,7 @@ function emitWGSLEntryPoint(
   const paramsPart = params.length > 0 ? params : "";
   const retPart = retType.length > 0 ? ` ${retType}` : "";
   lines.push(`fn main(${paramsPart})${retPart} {`);
-  for (const s of mainFn.body.statements) {
-    emitStatement(lines, s, 1, ctx);
-  }
+  emitStatements(lines, mainFn.body.statements, 1, ctx);
   lines.push("}");
 }
 
@@ -504,11 +502,44 @@ function emitExpressionStatement(
   lines.push(`${pad}_ = ${emitExpression(expr, ctx)};`);
 }
 
+function statementTerminatesFlow(stmt: IRStatement | IRModuleItem, insideLoop = false): boolean {
+  if (stmt.kind === "return" || stmt.kind === "discard") return true;
+  if (insideLoop && (stmt.kind === "break" || stmt.kind === "continue")) return true;
+  if (stmt.kind === "block") {
+    const last = stmt.statements.at(-1);
+    return last ? statementTerminatesFlow(last, insideLoop) : false;
+  }
+  if (stmt.kind === "if") {
+    const thenLast = stmt.thenBranch.statements.at(-1);
+    const elseLast = stmt.elseBranch?.statements.at(-1);
+    return Boolean(
+      thenLast && elseLast &&
+      statementTerminatesFlow(thenLast, insideLoop) &&
+      statementTerminatesFlow(elseLast, insideLoop),
+    );
+  }
+  return false;
+}
+
+function emitStatements(
+  lines: string[],
+  statements: readonly (IRStatement | IRModuleItem)[],
+  indent: number,
+  ctx: WgslContext,
+  insideLoop = false,
+): void {
+  for (const stmt of statements) {
+    emitStatement(lines, stmt, indent, ctx, insideLoop);
+    if (statementTerminatesFlow(stmt, insideLoop)) break;
+  }
+}
+
 function emitStatement(
   lines: string[],
   stmt: IRStatement | IRModuleItem,
   indent: number,
   ctx: WgslContext,
+  insideLoop = false,
 ): void {
   const pad = "  ".repeat(indent);
   if ((stmt.kind === "struct")) {
@@ -560,9 +591,7 @@ function emitStatement(
       .map((p) => `${p.name}: ${wgslType(p.type)}`)
       .join(", ");
     lines.push(`${pad}fn ${stmt.name}(${params}): ${wgslType(stmt.returnType)} {`);
-    for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
+    emitStatements(lines, stmt.body.statements, indent + 1, ctx);
     lines.push(`${pad}}`);
     return;
   }
@@ -597,32 +626,24 @@ function emitStatement(
   }
   if ((stmt.kind === "block")) {
     lines.push(`${pad}{`);
-    for (const s of stmt.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
+    emitStatements(lines, stmt.statements, indent + 1, ctx, insideLoop);
     lines.push(`${pad}}`);
     return;
   }
   if ((stmt.kind === "if")) {
     lines.push(`${pad}if ${emitExpression(stmt.condition, ctx)} {`);
-    for (const s of stmt.thenBranch.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
+    emitStatements(lines, stmt.thenBranch.statements, indent + 1, ctx, insideLoop);
     lines.push(`${pad}}`);
     if (stmt.elseBranch) {
       lines.push(`${pad}else {`);
-      for (const s of stmt.elseBranch.statements) {
-        emitStatement(lines, s, indent + 1, ctx);
-      }
+      emitStatements(lines, stmt.elseBranch.statements, indent + 1, ctx, insideLoop);
       lines.push(`${pad}}`);
     }
     return;
   }
   if ((stmt.kind === "while")) {
     lines.push(`${pad}while ${emitExpression(stmt.condition, ctx)} {`);
-    for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
+    emitStatements(lines, stmt.body.statements, indent + 1, ctx, true);
     lines.push(`${pad}}`);
     return;
   }
@@ -632,18 +653,8 @@ function emitStatement(
       const startCode = emitExpression(start, ctx);
       const endCode = emitExpression(end, ctx);
       const condOp = inclusive ? "<=" : "<";
-      // Scope the loop variable so it can shadow an outer binding.
-      lines.push(`${pad}{`);
-      lines.push(`${pad}  var ${variable} = ${startCode};`);
-      lines.push(`${pad}  loop {`);
-      lines.push(`${pad}    if (!(${variable} ${condOp} ${endCode})) {`);
-      lines.push(`${pad}      break;`);
-      lines.push(`${pad}    }`);
-      for (const s of stmt.body.statements) {
-        emitStatement(lines, s, indent + 2, ctx);
-      }
-      lines.push(`${pad}    ${variable} = ${variable} + 1;`);
-      lines.push(`${pad}  }`);
+      lines.push(`${pad}for (var ${variable} = ${startCode}; ${variable} ${condOp} ${endCode}; ${variable} = ${variable} + 1) {`);
+      emitStatements(lines, stmt.body.statements, indent + 1, ctx, true);
       lines.push(`${pad}}`);
       return;
     }
@@ -661,31 +672,27 @@ function emitStatement(
       lines.push(`${pad}    break;`);
       lines.push(`${pad}  }`);
     }
-    for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
+    emitStatements(lines, stmt.body.statements, indent + 1, ctx, true);
     if (stmt.increment) {
-      emitExpressionStatement(lines, stmt.increment, indent + 1, ctx);
+      lines.push(`${pad}  continuing {`);
+      emitExpressionStatement(lines, stmt.increment, indent + 2, ctx);
+      lines.push(`${pad}  }`);
     }
     lines.push(`${pad}}`);
     return;
   }
   if ((stmt.kind === "doWhile")) {
     lines.push(`${pad}loop {`);
-    for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
-    lines.push(`${pad}  if (!(${emitExpression(stmt.condition, ctx)})) {`);
-    lines.push(`${pad}    break;`);
+    emitStatements(lines, stmt.body.statements, indent + 1, ctx, true);
+    lines.push(`${pad}  continuing {`);
+    lines.push(`${pad}    break if !(${emitExpression(stmt.condition, ctx)});`);
     lines.push(`${pad}  }`);
     lines.push(`${pad}}`);
     return;
   }
   if ((stmt.kind === "loop")) {
     lines.push(`${pad}loop {`);
-    for (const s of stmt.body.statements) {
-      emitStatement(lines, s, indent + 1, ctx);
-    }
+    emitStatements(lines, stmt.body.statements, indent + 1, ctx, true);
     lines.push(`${pad}}`);
     return;
   }

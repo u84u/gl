@@ -2,7 +2,6 @@ node_modules/
 tsconfig.tsbuildinfo
 coverage/
 test/
-scripts/
 .freebuff/
 .git/
 .gitignore

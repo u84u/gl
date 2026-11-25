@@ -525,8 +525,7 @@ function emitStatement(
       const startCode = emitExpression(stmt.range.start);
       const endCode = emitExpression(stmt.range.end);
       const condOp = stmt.range.inclusive ? "<=" : "<";
-      // Loop variable is implicitly an int
-      lines.push(`${pad}for (int loopIndex = ${startCode}; loopIndex ${condOp} ${endCode}; loopIndex++) {`);
+      lines.push(`${pad}for (int ${stmt.range.variable} = ${startCode}; ${stmt.range.variable} ${condOp} ${endCode}; ${stmt.range.variable}++) {`);
       for (const s of stmt.body.statements) {
         emitStatement(lines, s, indent + 1, stage, outputInfo);
       }

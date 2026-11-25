@@ -1,7 +1,8 @@
 fn main(): vec4 {
+  let mut i: i32 = 0
   loop {
+    if (i > 0) { continue }
     break
-    continue
   }
   return vec4(1.0, 0.0, 0.0, 1.0)
 }

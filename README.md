@@ -92,13 +92,20 @@ Package entry points: `@u84u/gl` (core), `@u84u/gl/node` (filesystem resolver), 
 
 ## Development
 
+Development and CI require **Node.js 22.12.0 or newer**. CI checks Node 22.12 and Node 24 on Linux, Windows, and macOS.
+
 ```bash
-npm install          # dependencies
-npm run build        # tsup bundle to dist/ (ESM)
-npm run typecheck    # tsc --noEmit (strict)
-npm test             # vitest — full test suite
-npm run validate     # build & run C shader validator (needs libOSMesa, libGL)
-```
+npm ci                      # reproducible dependency install
+npm run install:browsers    # once: Playwright Chromium for render tests
+npm run build               # tsup bundle to dist/ (ESM)
+npm run typecheck           # tsc --noEmit (strict)
+npm test                    # vitest — full test suite
+npm run test:render         # only the WebGL2 render tests
+npm run test:package        # pack/install and smoke-test published entry points
+
+The full suite independently validates every generated WGSL fixture with [Naga](https://github.com/gfx-rs/wgpu/tree/trunk/naga), in addition to checking golden output. Naga runs through the `naga-wasi-cli` dev dependency; it does not require installing Rust.
+
+Render validation runs through Playwright against the standalone WebGL2 page in `test/webgl/index.html`, so no C toolchain, OSMesa, or apitrace is required. Open that page directly in a WebGL2-capable browser to edit and render a fragment shader by hand. On Linux CI, install Chromium system dependencies with `npx playwright install --with-deps chromium`.
 
 ## License
 

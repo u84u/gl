@@ -9,6 +9,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, "fixtures", "gl");
 const expectedDir = join(__dirname, "fixtures", "glsl");
 
+function readText(file: string): string {
+  return readFileSync(file, "utf-8").replace(/\r\n/g, "\n");
+}
+
 function getFixtureNames(): string[] {
   return readdirSync(fixturesDir)
     .filter((f) => f.endsWith(".gl"))
@@ -29,8 +33,8 @@ describe("golden-file GLSL output", () => {
   for (const name of names) {
     it(`matches golden output for ${name}`, async () => {
       const file = join(fixturesDir, `${name}.gl`);
-      const source = readFileSync(file, "utf-8");
-      const expected = readFileSync(join(expectedDir, `${name}.glsl`), "utf-8");
+      const source = readText(file);
+      const expected = readText(join(expectedDir, `${name}.glsl`));
 
       let result;
       if (source.includes("import")) {

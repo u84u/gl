@@ -314,7 +314,7 @@ function formatStatement(stmt: Statement, indent: number): string {
   if (isForStmt(stmt)) {
     if (stmt.range) {
       const rangeOp = stmt.range.inclusive ? "..=" : "..";
-      const lines = [`${pad}for __loop_var in ${formatExpression(stmt.range.start)}${rangeOp}${formatExpression(stmt.range.end)} {`];
+      const lines = [`${pad}for ${stmt.range.variable} in ${formatExpression(stmt.range.start)}${rangeOp}${formatExpression(stmt.range.end)} {`];
       for (const s of stmt.body.statements) {
         lines.push(formatStatement(s, indent + 1));
       }

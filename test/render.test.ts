@@ -1,33 +1,83 @@
-import { describe, it, expect } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { chromium, type Browser, type Page } from "playwright";
+import { dirname, join } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import { compile } from "../src/index";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { execSync } from "child_process";
 
-const VALIDATE_BIN = join(__dirname, "cvalidate", "build", "gl_validate");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PAGE_URL = pathToFileURL(join(__dirname, "webgl", "index.html")).href;
 
-function renderPixel(glslSource: string, width = 4, height = 4): string {
-  const dir = mkdtempSync(join(tmpdir(), "gl-render-"));
-  try {
-    const glslPath = join(dir, "shader.glsl");
-    writeFileSync(glslPath, glslSource);
-    const output = execSync(`${VALIDATE_BIN} ${glslPath} ${width} ${height}`, {
-      encoding: "utf-8",
-    }).trim();
-    // Output format: "<colored_count> <RRGGBBAA>" — return just the color
-    return output.split(" ")[1] ?? output;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+interface RenderResult {
+  ok: boolean;
+  stage?: string;
+  error?: string;
+  pixel?: string;
+  pixels?: number[];
+  width?: number;
+  height?: number;
+  glError?: number;
 }
 
-function compileToGlsl(source: string): string {
-  const result = compile({ source, target: "glsl", file: "test.gl" });
+let browser: Browser | undefined;
+let page: Page | undefined;
+
+async function openPage(target: Browser): Promise<Page> {
+  const next = await target.newPage();
+  await next.goto(PAGE_URL);
+  return next;
+}
+
+async function hasWebGL2(target: Page): Promise<boolean> {
+  return target.evaluate(() => document.createElement("canvas").getContext("webgl2") !== null);
+}
+
+async function launchRenderer(): Promise<{ browser: Browser; page: Page }> {
+  const attempts = [
+    ["--enable-unsafe-swiftshader"],
+    ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+  ];
+  let lastError: unknown;
+  for (const args of attempts) {
+    let candidate: Browser;
+    try {
+      candidate = await chromium.launch({ headless: true, args });
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+    try {
+      const candidatePage = await openPage(candidate);
+      if (await hasWebGL2(candidatePage)) {
+        return { browser: candidate, page: candidatePage };
+      }
+      lastError = new Error("Chromium launched but WebGL2 is unavailable");
+    } catch (err) {
+      lastError = err;
+    }
+    await candidate.close().catch(() => {});
+  }
+  throw new Error(
+    "Could not create a WebGL2 context in Playwright Chromium. " +
+      "Install the browser with `npx playwright install chromium`; on Linux CI also run " +
+      "`npx playwright install --with-deps chromium`. " +
+      (lastError instanceof Error ? lastError.message : String(lastError ?? "")),
+  );
+}
+
+beforeAll(async () => {
+  const launched = await launchRenderer();
+  browser = launched.browser;
+  page = launched.page;
+}, 180_000);
+
+afterAll(async () => {
+  await browser?.close();
+});
+
+function compileFragment(source: string): string {
+  const result = compile({ source, target: "glsl-es-300", file: "test.gl" });
   if (result.diagnostics.length > 0) {
-    throw new Error(
-      `Compile errors: ${result.diagnostics.map((d) => d.message).join(", ")}`
-    );
+    throw new Error(`Compile errors: ${result.diagnostics.map((d) => d.message).join(", ")}`);
   }
   if (!result.code) {
     throw new Error("No code generated");
@@ -35,40 +85,71 @@ function compileToGlsl(source: string): string {
   return result.code;
 }
 
-describe("headless render validation (Mesa llvmpipe)", () => {
-  it("renders solid color shader", () => {
-    const glsl = compileToGlsl(`
+async function render(fragmentSource: string, width = 8, height = 8): Promise<RenderResult> {
+  if (!page) {
+    throw new Error("Playwright page is not initialized");
+  }
+  return page.evaluate(
+    ({ source, w, h }) => {
+      const renderer = (window as unknown as {
+        renderShader: (fragment: string, options: { width: number; height: number }) => RenderResult;
+      }).renderShader;
+      return renderer(source, { width: w, height: h });
+    },
+    { source: fragmentSource, w: width, h: height },
+  );
+}
+
+function renderGlsl(source: string): Promise<RenderResult> {
+  return render(compileFragment(source));
+}
+
+function expectPixel(
+  result: RenderResult,
+  expected: [number, number, number, number],
+  tolerance = 1,
+): void {
+  expect(result.ok, result.error ?? "render failed").toBe(true);
+  expect(result.glError ?? 0).toBe(0);
+  expect(result.pixels).toHaveLength(4);
+  for (let channel = 0; channel < 4; channel++) {
+    expect(
+      Math.abs(result.pixels![channel]! - expected[channel]!),
+      `channel ${channel}: got ${result.pixels!.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerance);
+  }
+}
+
+describe("headless WebGL2 render validation (Playwright + Chromium)", () => {
+  it("renders solid color shader", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
         return vec4(1.0, 0.5, 0.25, 1.0)
       }
     `);
-    const pixel = renderPixel(glsl);
-    // vec4(1.0, 0.5, 0.25, 1.0) -> FF8040FF
-    expect(pixel).toBe("FF8040FF");
+    expectPixel(result, [255, 128, 64, 255]);
   });
 
-  it("renders black color", () => {
-    const glsl = compileToGlsl(`
+  it("renders black color", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
         return vec4(0.0, 0.0, 0.0, 1.0)
       }
     `);
-    const pixel = renderPixel(glsl);
-    expect(pixel).toBe("000000FF");
+    expectPixel(result, [0, 0, 0, 255]);
   });
 
-  it("renders white color", () => {
-    const glsl = compileToGlsl(`
+  it("renders white color", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
         return vec4(1.0, 1.0, 1.0, 1.0)
       }
     `);
-    const pixel = renderPixel(glsl);
-    expect(pixel).toBe("FFFFFFFF");
+    expectPixel(result, [255, 255, 255, 255]);
   });
 
-  it("renders conditional shader (true branch)", () => {
-    const glsl = compileToGlsl(`
+  it("renders conditional shader (true branch)", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
         let x: f32 = 1.0
         if (x > 0.5) {
@@ -78,13 +159,11 @@ describe("headless render validation (Mesa llvmpipe)", () => {
         }
       }
     `);
-    const pixel = renderPixel(glsl);
-    // x > 0.5 is true -> red
-    expect(pixel).toBe("FF0000FF");
+    expectPixel(result, [255, 0, 0, 255]);
   });
 
-  it("renders conditional shader (false branch)", () => {
-    const glsl = compileToGlsl(`
+  it("renders conditional shader (false branch)", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
         let x: f32 = 0.1
         if (x > 0.5) {
@@ -94,13 +173,11 @@ describe("headless render validation (Mesa llvmpipe)", () => {
         }
       }
     `);
-    const pixel = renderPixel(glsl);
-    // x > 0.5 is false -> blue
-    expect(pixel).toBe("0000FFFF");
+    expectPixel(result, [0, 0, 255, 255]);
   });
 
-  it("renders binary operations", () => {
-    const glsl = compileToGlsl(`
+  it("renders binary operations", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
         let a: f32 = 1.0
         let b: f32 = 2.0
@@ -108,63 +185,28 @@ describe("headless render validation (Mesa llvmpipe)", () => {
         return vec4(c / 3.0, 0.0, 0.0, 1.0)
       }
     `);
-    const pixel = renderPixel(glsl);
-    // (1.0 + 2.0) / 3.0 = 1.0 -> red
-    expect(pixel).toBe("FF0000FF");
+    expectPixel(result, [255, 0, 0, 255]);
   });
 
-  it("rejects GLSL that fails to compile", () => {
-    // This GLSL has a syntax error
-    const badGlsl = "#version 450 core\nout vec4 fragColor;\nvoid main() { fragColor = ;\n}";
-    const dir = mkdtempSync(join(tmpdir(), "gl-render-"));
-    try {
-      const glslPath = join(dir, "bad.glsl");
-      writeFileSync(glslPath, badGlsl);
-      expect(() =>
-        execSync(`${VALIDATE_BIN} ${glslPath} 4 4`, { encoding: "utf-8" })
-      ).toThrow();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("traces GL calls with apitrace", () => {
-    const glsl = compileToGlsl(`
+  it("renders a while loop", async () => {
+    const result = await renderGlsl(`
       fn main(): vec4 {
-        return vec4(1.0, 0.0, 0.0, 1.0)
+        let mut i: i32 = 0
+        let mut total: f32 = 0.0
+        while (i < 4) {
+          total += 0.25
+          i += 1
+        }
+        return vec4(total, 0.0, 0.0, 1.0)
       }
     `);
-    const dir = mkdtempSync(join(tmpdir(), "gl-render-"));
-    try {
-      const glslPath = join(dir, "shader.glsl");
-      const tracePath = join(dir, "trace.trace");
-      writeFileSync(glslPath, glsl);
+    expectPixel(result, [255, 0, 0, 255]);
+  });
 
-      // Run validator under apitrace trace (may fail on link under some Mesa
-      // versions, but trace file should still be created with captured calls)
-      try {
-        execSync(`apitrace trace -o ${tracePath} ${VALIDATE_BIN} ${glslPath} 4 4`, {
-          encoding: "utf-8",
-        });
-      } catch {
-        // apitrace tracing may fail on link; that's OK for this test
-      }
-
-      // Trace file should exist and contain captured GL calls
-      expect(existsSync(tracePath)).toBe(true);
-
-      const dump = execSync(`apitrace dump ${tracePath}`, {
-        encoding: "utf-8",
-      });
-
-      // Should capture shader compilation
-      expect(dump).toMatch(/glCompileShader/);
-      // Should capture program linking
-      expect(dump).toMatch(/glLinkProgram/);
-      // Should capture shader source with our vec4 value
-      expect(dump).toMatch(/1\.0.*0\.0.*0\.0.*1\.0/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  it("reports GLSL that fails to compile", async () => {
+    const result = await render("#version 300 es\nout vec4 fragColor;\nvoid main() { fragColor = ;\n}");
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe("fragment");
+    expect(result.error).toBeTruthy();
   });
 });
